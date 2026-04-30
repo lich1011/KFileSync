@@ -1,0 +1,26 @@
+# KFileSync Global Rules & Guidelines
+
+You are working on KFileSync (LanSync), a zero-trust LAN file synchronization app via Tauri + Rust + Vue 3.
+You MUST follow these rules when generating or modifying code in this project:
+
+## Architecture (Strict Hexagonal + DDD)
+1. The `domain/` module is pure. NEVER import from `infrastructure/`, `application/`, or `interfaces/`.
+2. Do IO abstractly. Define traits in `domain/port/` and implement them in `infrastructure/`.
+3. Do state mutation exclusively through Aggregate Roots. Make invalid states unrepresentable. Use `DomainError` enum.
+4. Separate technical errors (`InfraError`) from `DomainError`. Do not bubble SQL/Network errors into Domain logic.
+
+## Front-End (Vue 3, Vite, TS)
+1. Use Composition API (`<script setup lang="ts">`).
+2. Manage state with Pinia, bucketed by Bounded Context (e.g., `useTransferStore`, `useIdentityStore`).
+3. Isolate Tauri commands inside `composables/useTauri*.ts`.
+
+## Structure Conventions
+- **Domain Event**: Name things in past tense (`DeviceDiscovered`, `TrustRevoked`).
+- **Value Objects**: Wrappers implementing Clone, Eq, PartialEq, Hash (e.g. `struct DeviceId(String);`).
+- **Adapter Files**: Prefix with tech name: `sqlite_device_repo.rs`, `in_process_bus.rs`.
+
+## Working with Documentation
+To limit token usage, DO NOT LOAD large v3 design specs. 
+Instead, load specific files when resolving tasks:
+- `documents/phases/PHASE_X.md` for current sprint goals.
+- `documents/domains/XXXX.md` for specific rules regarding transfer, identity, etc.
