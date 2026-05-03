@@ -3,7 +3,9 @@ use async_trait::async_trait;
 
 use crate::domain::error::DomainError;
 use crate::domain::model::device::DeviceId;
-use crate::domain::model::file_entry::{FileEntry, SyncAction, SyncPlan};
+use crate::domain::model::file_entry::{
+    ConflictResolution, FileEntry, SyncAction, SyncPlan, VersionVector,
+};
 use crate::domain::model::share::{ShareId, SharePermission};
 use crate::domain::model::transfer::{TransferJob, TransferType, FileRequest};
 use crate::domain::port::event_bus::EventBus;
@@ -14,7 +16,7 @@ use crate::domain::port::file_index_repo::FileIndexRepository;
 use crate::domain::port::transfer_repo::TransferRepository;
 use crate::domain::service::chunking::ChunkingStrategy;
 use crate::domain::service::sync_plan_generator::SyncPlanGenerator;
-use crate::domain::event::transfer::TransferRequested;
+use crate::domain::event::sync_events::{SyncCompleted, ConflictDetected};
 use crate::infrastructure::network::dto::SyncIndexResponseDto;
 use crate::application::sync_flow::SyncFlowTemplate;
 
@@ -131,7 +133,7 @@ impl SyncFlowTemplate for HttpSyncFlow {
                 pull_files,
                 self.chunking_strategy.as_ref(),
             );
-            job.share_id = plan.to_pull.first().map(|a| a.entry.share_id.clone());
+            job.share_id = plan.to_pull.first().map(|a| a.entry.share_id.0.clone());
             self.transfer_repo.save(job).await?;
         }
 
@@ -151,7 +153,7 @@ impl SyncFlowTemplate for HttpSyncFlow {
                 push_files,
                 self.chunking_strategy.as_ref(),
             );
-            job.share_id = plan.to_push.first().map(|a| a.entry.share_id.clone());
+            job.share_id = plan.to_push.first().map(|a| a.entry.share_id.0.clone());
             self.transfer_repo.save(job).await?;
         }
 
@@ -172,7 +174,7 @@ impl SyncFlowTemplate for HttpSyncFlow {
                         files,
                         self.chunking_strategy.as_ref(),
                     );
-                    job.share_id = Some(conflict.local.share_id.clone());
+                    job.share_id = Some(conflict.local.share_id.0.clone());
                     self.transfer_repo.save(job).await?;
                 }
                 ConflictResolution::KeepRemote => {
@@ -190,7 +192,7 @@ impl SyncFlowTemplate for HttpSyncFlow {
                         files,
                         self.chunking_strategy.as_ref(),
                     );
-                    job.share_id = Some(conflict.remote.share_id.clone());
+                    job.share_id = Some(conflict.remote.share_id.0.clone());
                     self.transfer_repo.save(job).await?;
                 }
                 ConflictResolution::KeepLocal | ConflictResolution::Pending => {
@@ -234,18 +236,19 @@ impl SyncFlowTemplate for HttpSyncFlow {
     }
 
 
-    async fn emit_events(&self, _plan: &SyncPlan) -> Result<(), DomainError> {
-        // TransferRequested events are published in execute_plan; sync completion
-        // events will be published by transfer_service when jobs finish.
+    async fn emit_events(&self, plan: &SyncPlan) -> Result<(), DomainError> {
         let files_synced: u32 = (plan.to_pull.len() + plan.to_push.len()) as u32;
 
-        if let Some(first_action: &SyncAction) = plan.to_pull.first().or(plan.to_push.first()) {
+        // Publish SyncCompleted if any files were transferred
+        let first_action = plan.to_pull.first().or_else(|| plan.to_push.first());
+        if let Some(action) = first_action {
             self.event_bus.publish(Box::new(SyncCompleted {
-                share_id: first_action.entry.share_id.clone(),
+                share_id: action.entry.share_id.clone(),
                 files_synced,
             }));
         }
 
+        // Publish ConflictDetected for every unresolved conflict
         for conflict in &plan.conflicts {
             self.event_bus.publish(Box::new(ConflictDetected {
                 share_id: conflict.local.share_id.clone(),
@@ -257,6 +260,4 @@ impl SyncFlowTemplate for HttpSyncFlow {
 
         Ok(())
     }
-
-
 }
