@@ -1,5 +1,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use crate::domain::error::DomainError;
+
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntry {
@@ -12,6 +15,6 @@ pub struct AuditEntry {
 
 #[async_trait]
 pub trait AuditLogRepository: Send + Sync {
-    async fn append(&self, entry: &AuditEntry) -> Result<(), String>;
+    async fn append(&self, entry: &AuditEntry) -> Result<(), DomainError>;
     // async fn query(&self, filter: &AuditFilter) -> Result<Vec<AuditEntry>, String>;
 }

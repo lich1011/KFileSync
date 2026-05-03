@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
+use crate::domain::error::DomainError;
 use crate::domain::model::device::DeviceId;
 use crate::domain::model::share::ShareId;
 use crate::domain::port::repository::DeviceRepository;
@@ -26,12 +27,12 @@ impl PolicyEnforcer {
     }
 
     /// Check if a transfer from/to the given device is allowed (must be Paired).
-    pub async fn check_transfer(&self, peer: &DeviceId) -> Result<(), String> {
+    pub async fn check_transfer(&self, peer: &DeviceId) -> Result<(), DomainError> {
         let device = self
             .device_repo
             .find_by_id(peer.clone())
             .await?
-            .ok_or_else(|| format!("Device {} not found", peer.0))?;
+            .ok_or_else(|| DomainError::DeviceNotFound(peer.0.clone()))?;
 
         // We can use a dummy context for transfer check, but since we refactored
         // TrustedDeviceSpec to use SyncContext, we should probably refactor TrustedDeviceSpec 
@@ -39,7 +40,7 @@ impl PolicyEnforcer {
         // Wait! The prompt says we just check device pairing.
         // Let's create a quick check without full context.
         if !matches!(device.state, crate::domain::model::device::DeviceState::Paired(_)) {
-            return Err(format!("Device {} is not trusted", peer.0));
+            return Err(DomainError::DeviceNotTrusted(peer.0.clone()));
         }
 
         Ok(())
@@ -52,18 +53,18 @@ impl PolicyEnforcer {
         peer: &DeviceId,
         share_id: &ShareId,
         action: SyncDirection,
-    ) -> Result<(), String> {
+    ) -> Result<(), DomainError> {
         let device = self
             .device_repo
             .find_by_id(peer.clone())
             .await?
-            .ok_or_else(|| format!("Device {} not found", peer.0))?;
+            .ok_or_else(|| DomainError::DeviceNotFound(peer.0.clone()))?;
 
         let share = self
             .share_repo
             .find_by_id(share_id)
             .await?
-            .ok_or_else(|| format!("Share {} not found", share_id.0))?;
+            .ok_or_else(|| DomainError::ShareNotFound(share_id.0.clone()))?;
 
         let ctx = SyncContext {
             device: &device,
@@ -74,10 +75,10 @@ impl PolicyEnforcer {
         let combined_spec = AndSpec(TrustedDeviceSpec, AndSpec(ShareMemberSpec, PermissionSpec));
 
         if !combined_spec.is_satisfied_by(&ctx) {
-            return Err(format!(
+            return Err(DomainError::PermissionDenied(format!(
                 "Sync action {:?} denied for device {} on share {}",
                 action, peer.0, share_id.0
-            ));
+            )));
         }
 
         Ok(())

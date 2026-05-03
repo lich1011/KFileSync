@@ -1,5 +1,6 @@
 use crate::domain::model::device::DeviceId;
 use crate::domain::port::key_store::KeyStore;
+use crate::domain::error::DomainError;  
 use std::fs;
 use std::path::PathBuf;
 // rcgen is used in generate_self_signed_cert()
@@ -22,34 +23,55 @@ impl FileKeyStore {
 }
 
 impl KeyStore for FileKeyStore {
-    fn store_private_key(&self, id: &DeviceId, key: &[u8]) -> Result<(), String> {
+    fn store_private_key(&self, id: &DeviceId, key: &[u8]) -> Result<(), DomainError> {
         let path = self.key_path(id);
-        fs::write(path, key).map_err(|e| format!("Failed to write key: {}", e))
+        fs::write(path, key).map_err(|e| DomainError::Security(format!("Failed to write key: {}", e)))
     }
 
-    fn load_private_key(&self, id: &DeviceId) -> Result<Vec<u8>, String> {
+    fn load_private_key(&self, id: &DeviceId) -> Result<Vec<u8>, DomainError> {
         let path = self.key_path(id);
-        fs::read(path).map_err(|e| format!("Failed to read key: {}", e))
+        fs::read(path).map_err(|e| DomainError::Security(format!("Failed to read key: {}", e)))
     }
 
-    fn delete_private_key(&self, id: &DeviceId) -> Result<(), String> {
+    fn delete_private_key(&self, id: &DeviceId) -> Result<(), DomainError> {
         let path = self.key_path(id);
         if path.exists() {
-            fs::remove_file(path).map_err(|e| format!("Failed to delete key: {}", e))
+            fs::remove_file(path).map_err(|e| DomainError::Security(format!("Failed to delete key: {}", e)))
         } else {
             Ok(())
         }
     }
 }
 
-/// Helper function to generate a self-signed certificate.
-/// Returns (cert_pem, key_pem) both as valid PEM strings.
-pub fn generate_self_signed_cert() -> Result<(String, String), String> {
-    let subject_alt_names = vec!["lansync.local".to_string()];
+/// Helper function to generate a self-signed Ed25519 certificate
+pub fn generate_self_signed_cert() -> Result<(String, String, Vec<u8>), DomainError> {
+    let subject_alt_names = vec!["lansync.local".to_string()];  
+    
     let cert = rcgen::generate_simple_self_signed(subject_alt_names)
-        .map_err(|e| format!("Cert generation failed: {}", e))?;
+        .map_err(|e| DomainError::Security(format!("Cert generation failed: {}", e)))?;
+
+    let cert_der = cert.serialize_der()
+        .map_err(|e| DomainError::Security(format!("Cert DER serialization failed: {}", e)))?;  
+
     let cert_pem = cert.serialize_pem()
-        .map_err(|e| format!("Cert serialization failed: {}", e))?;
+        .map_err(|e| DomainError::Security(format!("Cert serialization failed: {}", e)))?;
+
     let pk_pem = cert.serialize_private_key_pem();
-    Ok((cert_pem, pk_pem))
+
+    Ok((cert_pem, pk_pem, cert_der))
 }
+
+pub fn device_id_from_cert_der(cert_der: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(cert_der);
+    hash.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+pub fn fingerprint_short(device_id: &str) -> String {
+    let hex = if device_id.len() >= 16 { &device_id[0..16]} else { device_id };
+    hex.as_bytes()
+        .chunks(4)
+        .map(|c| std::str::from_utf8(c).unwrap_or("????"))
+        .collect::<Vec<_>>()
+        .join("-")
+}   

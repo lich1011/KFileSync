@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::domain::model::device::DeviceId;
 use crate::domain::model::share::{Share, ShareId, SharePermission, SyncMode};
+use crate::domain::error::DomainError;
 use crate::domain::port::event_bus::EventBus;
 use crate::domain::port::network::{NetworkClient, ShareInvite};
 use crate::domain::port::repository::DeviceRepository;
@@ -43,7 +44,7 @@ impl ShareAppService {
         share_name: String,
         local_path: String,
         sync_mode: SyncMode,
-    ) -> Result<ShareId, String> {
+    ) -> Result<ShareId, DomainError> {
         let sid = ShareId(share_id);
         let share = Share::create(
             sid.clone(),
@@ -69,22 +70,20 @@ impl ShareAppService {
         share_id: &ShareId,
         peer_id: &DeviceId,
         permission: SharePermission,
-    ) -> Result<(), String> {
+    ) -> Result<(), DomainError> {
         // Step 1: PolicyEnforcer check
-        if let Err(e) = self.policy_enforcer.check_transfer(peer_id).await {
-            return Err(format!("Cannot invite device: {}", e));
-        }
+        self.policy_enforcer.check_transfer(peer_id).await?;
 
         let share = self.share_repo.find_by_id(share_id).await?
-            .ok_or_else(|| format!("Share {} not found", share_id.0))?;
+            .ok_or_else(|| DomainError::ShareNotFound(share_id.0.clone()))?;
 
         // Step 2: Send POST /share/invite
         let peer_device = self.device_repo.find_by_id(peer_id.clone()).await?
-            .ok_or_else(|| format!("Peer device {} not found", peer_id.0))?;
+            .ok_or_else(|| DomainError::DeviceNotFound(peer_id.0.clone()))?;
             
         let address = match peer_device.state {
             crate::domain::model::device::DeviceState::Paired(data) => data.address,
-            _ => return Err(format!("Device {} is not paired", peer_id.0)),
+            _ => return Err(DomainError::DeviceNotTrusted(peer_id.0.clone())),
         };
         
         let req = ShareInvite {
@@ -99,8 +98,8 @@ impl ShareAppService {
             invited_by: self.local_device_id.0.clone(),
         };
 
-        if let Err(e) = self.network_client.invite_to_share(&address, crate::DEFAULT_PORT, req).await {
-            return Err(format!("Peer {} rejected the invitation: {}", peer_id.0, e));
+        if let Err(_e) = self.network_client.invite_to_share(&address, crate::DEFAULT_PORT, req).await {
+            return Err(DomainError::Network(format!("Peer {} rejected the invite", peer_id.0)));
         }
 
         // Step 3: Peer accepted, authorize member
@@ -108,16 +107,18 @@ impl ShareAppService {
             peer_id.clone(),
             permission.clone(),
             self.local_device_id.clone(),
-        ).map_err(|e| format!("{:?}", e))?;
+        ).map_err(|e| DomainError::BusinessRuleViolation(format!("{:?}", e)))?;
 
         // Step 4: Save and publish event
         if let Err(e) = self.share_repo.save(&updated_share).await {
             // COMPENSATION: Failed to persist after peer accepted.
             // In a real system, we must send a CANCEL/ROLLBACK message to the peer here.
-            println!("CRITICAL: Failed to save share after peer accepted. Rolling back peer {}", peer_id.0);
-            // mock_network_send_rollback(peer_id, share_id).await;
-            
-            return Err(format!("Failed to persist share membership: {}", e));
+            eprintln!("[ShareService] Failed to persist. Rolling back peer {}", peer_id.0);
+            let _ = self.network_client.cancel_share_invite(
+                &address, crate::DEFAULT_PORT,
+                &share_id.0, &self.local_device_id.0
+            ).await;
+            return Err(e);
         }
 
         self.event_bus.publish(Box::new(MemberAuthorized {
@@ -129,11 +130,11 @@ impl ShareAppService {
         Ok(())
     }
 
-    pub async fn remove_member(&self, share_id: &ShareId, peer_id: &DeviceId) -> Result<(), String> {
+    pub async fn remove_member(&self, share_id: &ShareId, peer_id: &DeviceId) -> Result<(), DomainError> {
         let share = self.share_repo.find_by_id(share_id).await?
-            .ok_or_else(|| format!("Share {} not found", share_id.0))?;
+            .ok_or_else(|| DomainError::ShareNotFound(share_id.0.clone()))?;
 
-        let updated_share = share.remove_member(peer_id).map_err(|e| format!("{:?}", e))?;
+        let updated_share = share.remove_member(peer_id)?;
 
         self.share_repo.save(&updated_share).await?;
 

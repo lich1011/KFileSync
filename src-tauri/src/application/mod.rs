@@ -1,3 +1,4 @@
+pub mod error;
 pub mod identity_service;
 pub mod transfer_service;
 pub mod share_service;

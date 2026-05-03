@@ -5,7 +5,9 @@ use crate::domain::port::key_store::KeyStore;
 use crate::domain::port::discovery::{DiscoveryProvider, DiscoveredDevice};
 use crate::domain::port::event_bus::EventBus;
 use crate::domain::port::network::{NetworkClient, PairingRequest};
+use crate::domain::error::DomainError;
 use crate::domain::event::identity::{DeviceDiscovered, PairingCompleted, TrustRevoked};
+use crate::infrastructure::security::keystore::fingerprint_short;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
@@ -16,6 +18,7 @@ use std::collections::HashMap;
 #[allow(dead_code)]
 pub struct DeviceAppService {
     local_device_id: DeviceId,
+    local_alias: String,
     repo: Arc<dyn DeviceRepository>,
     discovery: Arc<dyn DiscoveryProvider>,
     key_store: Arc<dyn KeyStore>,
@@ -27,6 +30,7 @@ pub struct DeviceAppService {
 impl DeviceAppService {
     pub fn new(
         local_device_id: DeviceId,
+        local_alias: String,
         repo: Arc<dyn DeviceRepository>,
         discovery: Arc<dyn DiscoveryProvider>,
         key_store: Arc<dyn KeyStore>,
@@ -35,6 +39,7 @@ impl DeviceAppService {
     ) -> Self {
         Self { 
             local_device_id, 
+            local_alias,
             repo, 
             discovery, 
             key_store, 
@@ -44,10 +49,16 @@ impl DeviceAppService {
         }
     }
 
+    fn sweep_expried_sessions(&self) {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let mut sessions = self.active_sessions.lock().unwrap();
+        sessions.retain(|_, session| session.expires_at > now);
+    }
+
     pub async fn discover_devices(&self) -> Result<Vec<DiscoveredDevice>, String> {
         let (tx, mut rx) = mpsc::channel(100);
         let discovery = self.discovery.clone();
-        
+
         let listener_handle = tokio::spawn(async move {
             if let Err(e) = discovery.listen(tx).await {
                 eprintln!("[DeviceAppService] Listen error: {}", e);
@@ -72,6 +83,7 @@ impl DeviceAppService {
 
         // Clean up: abort the listener task to prevent resource leak
         listener_handle.abort();
+        let _ = self.discovery.stop().await;
 
         // Fire DomainEvent for discovered devices
         for dev in &devices {
@@ -96,13 +108,15 @@ impl DeviceAppService {
         Ok(devices)
     }
 
-    pub async fn initiate_pairing(&self, target: &DeviceId) -> Result<PairingSession, String> {
+    pub async fn initiate_pairing(&self, target: &DeviceId) -> Result<PairingSession, DomainError> {
+        self.sweep_expried_sessions();
+
         let device = self.repo.find_by_id(target.clone()).await?
-            .ok_or_else(|| "Device not found".to_string())?;
+            .ok_or_else(|| DomainError::DeviceNotFound(target.0.clone()))?;
             
         let address = match &device.state {
             DeviceState::Discovered(data) => data.address.clone(),
-            _ => return Err("Device is not in Discovered state".to_string()),
+            _ => return Err(DomainError::InvalidStateTransition("Device is not in Discovered state")),
         };
 
         // Create pairing session
@@ -113,9 +127,9 @@ impl DeviceAppService {
         
         let req = PairingRequest {
             device_id: self.local_device_id.0.clone(),
-            alias: "Local Device".to_string(), // In real app, load from config
+            alias: self.local_alias.clone(),
             platform: std::env::consts::OS.to_string(),
-            fingerprint: "abcd-1234".to_string(), // In real app, generate from cert
+            fingerprint: fingerprint_short(&self.local_device_id.0),
         };
         
         // Send pairing request via network client
@@ -137,22 +151,35 @@ impl DeviceAppService {
         target_device_id: &DeviceId,
         pin_code: &str,
         cert_pem: String,
-    ) -> Result<(), String> {
+    ) -> Result<(), DomainError> {
         let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        
-        // B4 FIX: Retrieve session from memory
-        let session = self.active_sessions.lock().unwrap().remove(target_device_id)
-            .ok_or_else(|| format!("No active pairing session for device {}", target_device_id.0))?;
+       
+        let verify_result ={
+            let mut sessions = self.active_sessions.lock().unwrap();
+            let session = sessions.get_mut(target_device_id)
+                .ok_or_else(|| DomainError::NotFound(format!("No active pairing session for device {}", target_device_id.0)))?;
+            
+            let result = session.verify(pin_code, current_time);
 
-        // B4 FIX: 验证 PIN 码
-        session.verify(pin_code, current_time).map_err(|e| format!("{}", e))?;
+            if result.is_ok() || session.attempts >= session.max_attempts{
+                let target = session.target_device.clone();
+                let _ = session;
+                self.active_sessions.lock().unwrap().remove(&target);
+                result
+            } else {
+                result
+            }
 
-        let device = self.repo.find_by_id(session.target_device.clone()).await?
-            .ok_or_else(|| "Device not found".to_string())?;
+        };
 
-        let cert = Certificate::from_pem(cert_pem).map_err(|e| format!("{:?}", e))?;
+        verify_result?;
+
+        let device = self.repo.find_by_id(target_device_id.clone()).await?
+            .ok_or_else(|| DomainError::DeviceNotFound(target_device_id.0.clone()))?;
+
+        let cert = Certificate::from_pem(cert_pem)?;
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let updated_state = device.state.confirm_pairing(cert, timestamp).map_err(|e| format!("{:?}", e))?;
+        let updated_state = device.state.confirm_pairing(cert, timestamp)?;
 
         let updated_device = Device {
             id: device.id.clone(),
@@ -161,7 +188,6 @@ impl DeviceAppService {
 
         self.repo.save(updated_device).await?;
 
-        // B1 FIX: 使用真实的 local_device_id
         self.event_bus.publish(Box::new(PairingCompleted {
             local_device: self.local_device_id.clone(),
             peer_device: target_device_id.clone(),
@@ -171,12 +197,12 @@ impl DeviceAppService {
         Ok(())
     }
 
-    pub async fn revoke_trust(&self, device_id: &DeviceId) -> Result<(), String> {
+    pub async fn revoke_trust(&self, device_id: &DeviceId) -> Result<(), DomainError> {
         let device = self.repo.find_by_id(device_id.clone()).await?
-            .ok_or_else(|| "Device not found".to_string())?;
+            .ok_or_else(|| DomainError::DeviceNotFound(device_id.0.clone()))?;
 
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let updated_state = device.state.revoke(timestamp).map_err(|e| format!("{:?}", e))?;
+        let updated_state = device.state.revoke(timestamp)?;
 
         let updated_device = Device {
             id: device.id.clone(),

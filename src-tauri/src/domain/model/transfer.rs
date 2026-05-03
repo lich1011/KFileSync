@@ -270,6 +270,19 @@ impl TransferJob {
     }
 
     pub fn fail(mut self, error: TransferError) -> Result<Self, DomainError> {
+
+        match self.state {
+            TransferState::Active { .. }
+            | TransferState::Paused { .. }
+            | TransferState::Verifying
+            | TransferState::Failed { .. } => {}
+            _ => {
+                return Err(DomainError::InvalidStateTransition(
+                    "Only Active, Paused, Verifying or Failed jobs can be failed"
+                ));
+            }
+        }
+
         let retries = match self.state {
             TransferState::Failed { retries, .. } => retries + 1,
             _ => 0,

@@ -1,4 +1,5 @@
 use crate::domain::model::device::DeviceId;
+use crate::domain::error::DomainError;
 use async_trait::async_trait;
 use tokio::sync::mpsc::Sender;
 
@@ -19,7 +20,7 @@ pub struct DiscoveredDevice {
 
 #[async_trait]
 pub trait DiscoveryProvider: Send + Sync {
-    async fn announce(&self, info: &DeviceInfo) -> Result<(), String>;
-    async fn listen(&self, tx: Sender<DiscoveredDevice>) -> Result<(), String>;
-    async fn stop(&self) -> Result<(), String>;
+    async fn announce(&self, info: &DeviceInfo) -> Result<(), DomainError>;
+    async fn listen(&self, tx: Sender<DiscoveredDevice>) -> Result<(), DomainError>;
+    async fn stop(&self) -> Result<(), DomainError>;
 }

@@ -24,7 +24,7 @@ pub struct DiscoveredDeviceDto {
 
 #[tauri::command]
 pub async fn discover_devices(state: State<'_, AppState>) -> Result<Vec<DiscoveredDeviceDto>, String> {
-    let devices = state.identity_service.discover_devices().await?;
+    let devices = state.identity_service.discover_devices().await.map_err(|e| e.to_string())?;
     let dtos = devices.into_iter().map(|d| DiscoveredDeviceDto {
         id: d.device_id.0,
         alias: d.alias,
@@ -35,7 +35,7 @@ pub async fn discover_devices(state: State<'_, AppState>) -> Result<Vec<Discover
 
 #[tauri::command]
 pub async fn request_pairing(target_id: String, state: State<'_, AppState>) -> Result<String, String> {
-    let session = state.identity_service.initiate_pairing(&DeviceId(target_id)).await?;
+    let session = state.identity_service.initiate_pairing(&DeviceId(target_id)).await.map_err(|e| e.to_string())?;
     // Return the session id and pin code to the UI; UI must pass session_id back on confirm
     Ok(session.pin_code)
 }
@@ -47,7 +47,7 @@ pub async fn confirm_pairing(
     cert_pem: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    state.identity_service.confirm_pairing(&DeviceId(target_id), &pin_code, cert_pem).await
+    state.identity_service.confirm_pairing(&DeviceId(target_id), &pin_code, cert_pem).await.map_err(|e| e.to_string())
 }
 
 #[derive(Deserialize)]
@@ -68,28 +68,28 @@ pub async fn send_files(
         file_size: f.file_size,
         sha256: f.sha256,
     }).collect();
-    let job_id = state.transfer_service.send_files(DeviceId(peer_id), requests).await?;
+    let job_id = state.transfer_service.send_files(DeviceId(peer_id), requests).await.map_err(|e| e.to_string())?;  
     Ok(job_id.0)
 }
 
 #[tauri::command]
 pub async fn accept_transfer(job_id: String, state: State<'_, AppState>) -> Result<(), String> {
-    state.transfer_service.accept_transfer(&JobId(job_id)).await
+    state.transfer_service.accept_transfer(&JobId(job_id)).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn pause_transfer(job_id: String, state: State<'_, AppState>) -> Result<(), String> {
-    state.transfer_service.pause_transfer(&JobId(job_id)).await
+    state.transfer_service.pause_transfer(&JobId(job_id)).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn resume_transfer(job_id: String, state: State<'_, AppState>) -> Result<(), String> {
-    state.transfer_service.resume_transfer(&JobId(job_id)).await
+    state.transfer_service.resume_transfer(&JobId(job_id)).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn cancel_transfer(job_id: String, state: State<'_, AppState>) -> Result<(), String> {
-    state.transfer_service.cancel_transfer(&JobId(job_id)).await
+    state.transfer_service.cancel_transfer(&JobId(job_id)).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -106,7 +106,7 @@ pub async fn create_share(
     };
     
     let share_id = uuid::Uuid::new_v4().to_string();
-    let id = state.share_service.create_share(share_id, share_name, local_path, sync_mode).await?;
+    let id = state.share_service.create_share(share_id, share_name, local_path, sync_mode).await.map_err(|e| e.to_string())?;
     Ok(id.0)
 }
 
@@ -128,7 +128,7 @@ pub async fn invite_to_share(
         &crate::domain::model::share::ShareId(share_id),
         &DeviceId(peer_id),
         permission
-    ).await
+    ).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -140,10 +140,10 @@ pub async fn remove_share_member(
     state.share_service.remove_member(
         &crate::domain::model::share::ShareId(share_id),
         &DeviceId(peer_id)
-    ).await
+    ).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn start_watching_share(share_id: String, state: State<'_, AppState>) -> Result<(), String> {
-    state.indexer_service.start_watching(&crate::domain::model::share::ShareId(share_id)).await
+    state.indexer_service.start_watching(&crate::domain::model::share::ShareId(share_id)).await.map_err(|e| e.to_string())
 }

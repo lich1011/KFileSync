@@ -4,7 +4,12 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use tokio::sync::mpsc::Sender;
+use crate::domain::error::DomainError;
 use crate::domain::port::file_watcher::{FileEvent, FileEventType, FileWatcher, WatchHandle};
+
+fn fs_err(e: impl std::fmt::Display) -> DomainError{
+    DomainError::FileSystem(e.to_string())
+}
 
 pub struct NotifyWatcherAdapter {
     watchers: Arc<Mutex<HashMap<WatchHandle, RecommendedWatcher>>>,
@@ -26,7 +31,7 @@ impl Default for NotifyWatcherAdapter {
 
 #[async_trait]
 impl FileWatcher for NotifyWatcherAdapter {
-    async fn watch(&self, path: &Path, tx: Sender<FileEvent>) -> Result<WatchHandle, String> {
+    async fn watch(&self, path: &Path, tx: Sender<FileEvent>) -> Result<WatchHandle, DomainError> {
         let handle = uuid::Uuid::new_v4().to_string();
         
         let tx_clone = tx.clone();
@@ -67,10 +72,10 @@ impl FileWatcher for NotifyWatcherAdapter {
                     }
                 }
             }
-        }).map_err(|e| format!("Failed to create watcher: {}", e))?;
+        }).map_err(fs_err)?;
 
         watcher.watch(path, RecursiveMode::Recursive)
-            .map_err(|e| format!("Failed to watch path: {}", e))?;
+            .map_err(fs_err)?;
 
         // Store the watcher so it isn't dropped
         self.watchers.lock().unwrap().insert(handle.clone(), watcher);
@@ -78,12 +83,12 @@ impl FileWatcher for NotifyWatcherAdapter {
         Ok(handle)
     }
 
-    async fn unwatch(&self, handle: WatchHandle) -> Result<(), String> {
+    async fn unwatch(&self, handle: WatchHandle) -> Result<(), DomainError> {
         let mut watchers = self.watchers.lock().unwrap();
         if watchers.remove(&handle).is_some() {
             Ok(())
         } else {
-            Err(format!("Watcher handle {} not found", handle))
+            Err(DomainError::NotFound(format!("Watcher handle {} not found", handle)))
         }
     }
 }

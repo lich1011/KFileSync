@@ -1,5 +1,5 @@
 use std::path::Path;
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use crate::domain::model::file_entry::{ConflictResolution, FileEntry};
 
 pub struct ConflictResolver;
@@ -53,7 +53,9 @@ impl ConflictResolver {
         let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         
-        let datetime = Utc.timestamp_opt(timestamp as i64, 0).unwrap();
+        let datetime = Utc.timestamp_opt(timestamp as i64, 0)
+            .single()
+            .unwrap_or_else(|| DateTime::<Utc>::from(std::time::UNIX_EPOCH));
         let date_str = datetime.format("%Y%m%d").to_string();
         let time_str = datetime.format("%H%M%S").to_string();
         

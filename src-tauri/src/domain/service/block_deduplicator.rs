@@ -2,6 +2,7 @@ use std::sync::Arc;
 use crate::domain::model::file_entry::BlockInfo;
 use crate::domain::model::share::ShareId;
 use crate::domain::port::file_index_repo::{FileIndexRepository, LocalBlockCopy};
+use crate::domain::error::DomainError;
 
 pub struct DeduplicationResult {
     pub local_copies: Vec<LocalBlockCopy>,
@@ -18,7 +19,7 @@ impl BlockDeduplicator {
     }
 
     /// Deduplicates a list of needed blocks against the local file index
-    pub async fn deduplicate(&self, share_id: &ShareId, needed_blocks: &[BlockInfo]) -> Result<DeduplicationResult, String> {
+    pub async fn deduplicate(&self, share_id: &ShareId, needed_blocks: &[BlockInfo]) -> Result<DeduplicationResult, DomainError> {
         let mut local_copies = Vec::new();
         let mut network_fetches = Vec::new();
 

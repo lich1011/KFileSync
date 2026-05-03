@@ -1,55 +1,25 @@
 use async_trait::async_trait;
-use rusqlite::{Connection, Result as SqlResult, OptionalExtension, Transaction};
-use std::sync::Mutex;
+use rusqlite::{Connection, Result as SqlResult, OptionalExtension};
+use std::sync::{Arc, Mutex};
 
 use crate::domain::model::device::DeviceId;
 use crate::domain::model::share::{
     Share, ShareId, ShareMember, SharePermission, ShareStatus, SyncMode,
 };
 use crate::domain::port::share_repo::ShareRepository;
+use crate::domain::error::DomainError;
+
+fn db_err(e: impl std::fmt::Display) -> DomainError {
+    DomainError::Persistence(e.to_string())
+}   
 
 pub struct SqliteShareRepository {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl SqliteShareRepository {
-    pub fn new(db_path: &str) -> SqlResult<Self> {
-        let conn = Connection::open(db_path)?;
-        
-        // Ensure foreign keys are enabled
-        conn.execute("PRAGMA foreign_keys = ON;", [])?;
-        
-        // Create shares table
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS shares (
-                share_id        TEXT PRIMARY KEY,
-                share_name      TEXT NOT NULL,
-                local_path      TEXT NOT NULL,
-                sync_mode       TEXT NOT NULL DEFAULT 'two_way',
-                status          TEXT NOT NULL DEFAULT 'active',
-                created_by      TEXT NOT NULL,
-                created_at      INTEGER NOT NULL
-            )",
-            [],
-        )?;
-        
-        // Create share_members table
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS share_members (
-                share_id        TEXT NOT NULL,
-                device_id       TEXT NOT NULL,
-                permission      TEXT NOT NULL DEFAULT 'read_write',
-                authorized_by   TEXT NOT NULL,
-                authorized_at   INTEGER NOT NULL,
-                PRIMARY KEY (share_id, device_id),
-                FOREIGN KEY (share_id) REFERENCES shares(share_id) ON DELETE CASCADE
-            )",
-            [],
-        )?;
-
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
+    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
+        Self { conn }
     }
 
     fn serialize_sync_mode(mode: &SyncMode) -> &'static str {
@@ -106,10 +76,10 @@ impl SqliteShareRepository {
         }
     }
 
-    fn load_members(tx: &Transaction, share_id: &str) -> SqlResult<Vec<ShareMember>> {
-        let mut stmt = tx.prepare(
+    fn load_members_sync(conn: &Connection, share_id: &str) -> Result<Vec<ShareMember>, DomainError> {
+        let mut stmt = conn.prepare(
             "SELECT device_id, permission, authorized_by, authorized_at FROM share_members WHERE share_id = ?1"
-        )?;
+        ).map_err(db_err)?;
         
         let members = stmt.query_map([share_id], |row| {
             let device_id: String = row.get(0)?;
@@ -123,21 +93,24 @@ impl SqliteShareRepository {
                 authorized_by: DeviceId(authorized_by),
                 authorized_at,
             })
-        })?.collect::<SqlResult<Vec<_>>>()?;
+        }).map_err(db_err)? 
+        .collect::<SqlResult<Vec<_>>>()
+        .map_err(db_err)?;
         
         Ok(members)
     }
 
-    fn row_to_share(tx: &Transaction, row: &rusqlite::Row) -> SqlResult<Share> {
-        let share_id: String = row.get(0)?;
-        let share_name: String = row.get(1)?;
-        let local_path: String = row.get(2)?;
-        let sync_mode_str: String = row.get(3)?;
-        let status_str: String = row.get(4)?;
-        let created_by: String = row.get(5)?;
-        let created_at: u64 = row.get(6)?;
-
-        let members = Self::load_members(tx, &share_id)?;
+    fn assemble_share(
+        conn: &Connection, 
+        share_id: String,
+        share_name: String,
+        local_path: String,
+        sync_mode_str: String,
+        status_str: String,
+        created_by: String,
+        created_at: u64,
+    ) -> Result<Share, DomainError> {
+        let members = Self::load_members_sync(conn, &share_id)?;
 
         Ok(Share {
             share_id: ShareId(share_id),
@@ -154,103 +127,164 @@ impl SqliteShareRepository {
 
 #[async_trait]
 impl ShareRepository for SqliteShareRepository {
-    async fn save(&self, share: &Share) -> Result<(), String> {
-        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
+    async fn save(&self, share: &Share) -> Result<(), DomainError> {
+        let conn = self.conn.clone();
+        let share = share.clone();
 
-        // 1. Insert or Replace the Share
-        tx.execute(
-            "INSERT OR REPLACE INTO shares 
-            (share_id, share_name, local_path, sync_mode, status, created_by, created_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![
-                share.share_id.0,
-                share.share_name,
-                share.local_path,
-                Self::serialize_sync_mode(&share.sync_mode),
-                Self::serialize_status(&share.status),
-                share.created_by.0,
-                share.created_at,
-            ],
-        ).map_err(|e| e.to_string())?;
+        tokio::task::spawn_blocking(move || {
+            let mut conn = conn.lock().map_err(db_err)?;
+            let tx = conn.transaction().map_err(db_err)?;
 
-        // 2. Delete existing members for this share
-        tx.execute(
-            "DELETE FROM share_members WHERE share_id = ?1",
-            [&share.share_id.0],
-        ).map_err(|e| e.to_string())?;
+            // 1. Insert or Replace the Share
+            tx.execute(
+                "INSERT OR REPLACE INTO shares 
+                (share_id, share_name, local_path, sync_mode, status, created_by, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    share.share_id.0,
+                    share.share_name,
+                    share.local_path,
+                    Self::serialize_sync_mode(&share.sync_mode),
+                    Self::serialize_status(&share.status),
+                    share.created_by.0,
+                    share.created_at,
+                ],
+            ).map_err(db_err)?;
 
-        // 3. Insert all members
-        let mut stmt = tx.prepare(
-            "INSERT INTO share_members 
-            (share_id, device_id, permission, authorized_by, authorized_at)
-            VALUES (?1, ?2, ?3, ?4, ?5)"
-        ).map_err(|e| e.to_string())?;
+            // 2. Delete existing members for this share
+            tx.execute(
+                "DELETE FROM share_members WHERE share_id = ?1",
+                [&share.share_id.0],
+            ).map_err(db_err)?;
 
-        for member in &share.members {
-            stmt.execute(rusqlite::params![
-                share.share_id.0,
-                member.device_id.0,
-                Self::serialize_permission(&member.permission),
-                member.authorized_by.0,
-                member.authorized_at,
-            ]).map_err(|e| e.to_string())?;
-        }
-        
-        drop(stmt);
-        tx.commit().map_err(|e| e.to_string())?;
-        Ok(())
+            // 3. Insert all members
+            let mut stmt = tx.prepare(
+                "INSERT INTO share_members 
+                (share_id, device_id, permission, authorized_by, authorized_at)
+                VALUES (?1, ?2, ?3, ?4, ?5)",
+            ).map_err(db_err)?;
+
+            for member in &share.members {
+                stmt.execute(rusqlite::params![
+                    share.share_id.0,
+                    member.device_id.0,
+                    Self::serialize_permission(&member.permission),
+                    member.authorized_by.0,
+                    member.authorized_at,
+                ]).map_err(db_err)?;
+            }
+            
+            drop(stmt);
+            tx.commit().map_err(db_err)?;
+            Ok(())
+        }).await.map_err(db_err)?
     }
 
-    async fn find_by_id(&self, id: &ShareId) -> Result<Option<Share>, String> {
-        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
+    async fn find_by_id(&self, id: &ShareId) -> Result<Option<Share>, DomainError> {
+        let conn = self.conn.clone();
+        let id = id.clone();
 
-        let mut stmt = tx.prepare(
-            "SELECT share_id, share_name, local_path, sync_mode, status, created_by, created_at 
-             FROM shares WHERE share_id = ?1"
-        ).map_err(|e| e.to_string())?;
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(db_err)?;
 
-        let share = stmt.query_row([&id.0], |row| Self::row_to_share(&tx, row))
-            .optional()
-            .map_err(|e| e.to_string())?;
+            let mut stmt = conn.prepare(
+                "SELECT share_id, share_name, local_path, sync_mode, status, created_by, created_at 
+                 FROM shares WHERE share_id = ?1"
+            ).map_err(db_err)?;
 
-        Ok(share)
+            let row_opt = stmt.query_row([&id.0], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, u64>(6)?,
+                ))
+            }).optional()
+            .map_err(db_err)?;
+
+            match row_opt {
+                Some((id, name, path, mode, status, created_by, created_at)) => {
+                    let share = Self::assemble_share(&conn, id, name, path, mode, status, created_by, created_at)?;
+                    Ok(Some(share))
+                }
+                None => Ok(None),
+            }
+        }).await.map_err(db_err)?
     }
 
-    async fn find_by_member(&self, device_id: &DeviceId) -> Result<Vec<Share>, String> {
-        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
+    async fn find_by_member(&self, device_id: &DeviceId) -> Result<Vec<Share>, DomainError> {
+        let conn = self.conn.clone();
+        let device_id = device_id.clone();
 
-        let mut stmt = tx.prepare(
-            "SELECT s.share_id, s.share_name, s.local_path, s.sync_mode, s.status, s.created_by, s.created_at 
-             FROM shares s
-             JOIN share_members sm ON s.share_id = sm.share_id
-             WHERE sm.device_id = ?1"
-        ).map_err(|e| e.to_string())?;
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(db_err)?;
 
-        let shares = stmt.query_map([&device_id.0], |row| Self::row_to_share(&tx, row))
-            .map_err(|e| e.to_string())?
-            .collect::<SqlResult<Vec<_>>>()
-            .map_err(|e| e.to_string())?;
+            let mut stmt = conn.prepare(
+                "SELECT share_id, share_name, local_path, sync_mode, status, created_by, created_at 
+                 FROM shares s 
+                 JOIN share_members m ON s.share_id = m.share_id 
+                 WHERE m.device_id = ?1"
+            ).map_err(db_err)?;
 
-        Ok(shares)
+            let rows = stmt.query_map([&device_id.0], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, u64>(6)?,
+                ))
+            })
+            .map_err(db_err)?;
+
+            let mut shares = Vec::new();
+            for row in rows {
+                let (id, name, path, mode, status, created_by, created_at) = row.map_err(db_err)?;
+                let share = Self::assemble_share(&conn, id, name, path, mode, status, created_by, created_at)?;
+                shares.push(share);
+            }
+
+            Ok(shares)
+        }).await.map_err(db_err)?
     }
 
-    async fn find_all(&self) -> Result<Vec<Share>, String> {
-        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
+    async fn find_all(&self) -> Result<Vec<Share>, DomainError> {
+        let conn = self.conn.clone();
 
-        let mut stmt = tx.prepare(
-            "SELECT share_id, share_name, local_path, sync_mode, status, created_by, created_at 
-             FROM shares"
-        ).map_err(|e| e.to_string())?;
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(db_err)?;
 
-        let shares = stmt.query_map([], |row| Self::row_to_share(&tx, row))
-            .map_err(|e| e.to_string())?
-            .collect::<SqlResult<Vec<_>>>()
-            .map_err(|e| e.to_string())?;
+            let mut stmt = conn.prepare(
+                "SELECT share_id, share_name, local_path, sync_mode, status, created_by, created_at 
+                 FROM shares"
+            ).map_err(db_err)?;
 
-        Ok(shares)
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, u64>(6)?,
+                ))
+            })
+            .map_err(db_err)?;
+
+            let mut shares = Vec::new();
+            for row in rows {
+                let (id, name, path, mode, status, created_by, created_at) = row.map_err(db_err)?;
+                let share = Self::assemble_share(&conn, id, name, path, mode, status, created_by, created_at)?;
+                shares.push(share);
+            }
+
+            Ok(shares)
+        }).await.map_err(db_err)?
     }
 }

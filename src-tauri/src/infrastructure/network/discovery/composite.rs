@@ -1,4 +1,5 @@
 use crate::domain::port::discovery::{DiscoveryProvider, DeviceInfo, DiscoveredDevice};
+use crate::domain::error::DomainError;
 use async_trait::async_trait;
 use tokio::sync::mpsc::Sender;
 
@@ -6,9 +7,9 @@ use tokio::sync::mpsc::Sender;
 pub trait DiscoveryStrategy: Send + Sync {
     fn name(&self) -> &str;
     fn priority(&self) -> u8; // 1=mDNS, 2=HTTP, 3=Manual
-    async fn announce(&self, info: &DeviceInfo) -> Result<(), String>;
-    async fn discover(&self, tx: Sender<DiscoveredDevice>) -> Result<(), String>;
-    async fn stop(&self) -> Result<(), String>;
+    async fn announce(&self, info: &DeviceInfo) -> Result<(), DomainError>;
+    async fn discover(&self, tx: Sender<DiscoveredDevice>) -> Result<(), DomainError>;
+    async fn stop(&self) -> Result<(), DomainError>;
 }
 
 pub struct CompositeDiscovery {
@@ -24,7 +25,7 @@ impl CompositeDiscovery {
 
 #[async_trait]
 impl DiscoveryProvider for CompositeDiscovery {
-    async fn announce(&self, info: &DeviceInfo) -> Result<(), String> {
+    async fn announce(&self, info: &DeviceInfo) -> Result<(), DomainError> {
         for strategy in &self.strategies {
             if let Err(e) = strategy.announce(info).await {
                 eprintln!("[CompositeDiscovery] Strategy {} failed to announce: {}", strategy.name(), e);
@@ -32,10 +33,10 @@ impl DiscoveryProvider for CompositeDiscovery {
                 return Ok(()); // First successful strategy wins for announce
             }
         }
-        Err("All discovery strategies failed to announce".to_string())
+        Err(DomainError::Network("All discovery strategies failed to announce".into()))
     }
 
-    async fn listen(&self, tx: Sender<DiscoveredDevice>) -> Result<(), String> {
+    async fn listen(&self, tx: Sender<DiscoveredDevice>) -> Result<(), DomainError> {
         for strategy in &self.strategies {
             let tx_clone = tx.clone();
             let name = strategy.name().to_string();
@@ -49,10 +50,10 @@ impl DiscoveryProvider for CompositeDiscovery {
                 return Ok(()); // Listening successfully started
             }
         }
-        Err("All discovery strategies failed to listen".to_string())
+        Err(DomainError::Network("All discovery strategies failed to listen".into()))
     }
 
-    async fn stop(&self) -> Result<(), String> {
+    async fn stop(&self) -> Result<(), DomainError> {
         for strategy in &self.strategies {
             let _ = strategy.stop().await;
         }

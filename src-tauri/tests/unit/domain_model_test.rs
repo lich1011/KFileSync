@@ -47,16 +47,42 @@ fn test_pairing_session_verify() {
     let target = DeviceId("device_abc".to_string());
     let pin = "123456".to_string();
     let expires_at = 9999999999u64;
-    let session = PairingSession::new(target, pin.clone(), expires_at);
+    let mut session = PairingSession::new(target, pin.clone(), expires_at);
 
     // Correct pin within time — should pass
     assert!(session.verify(&pin, 1000000000).is_ok());
 
     // Wrong pin — should fail with InvalidPinCode
-    let err = session.verify("000000", 1000000000).unwrap_err();
+    let mut session2 = PairingSession::new(
+        DeviceId("device_abc".to_string()), pin.clone(),expires_at
+    );
+    let err = session2.verify("000000", 1000000000).unwrap_err();
     assert_eq!(err, DomainError::InvalidPinCode);
 
     // Expired — should fail with SessionExpired
-    let err = session.verify(&pin, expires_at + 1).unwrap_err();
+    let mut session3 = PairingSession::new(
+        DeviceId("device_abc".to_string()), pin.clone(),expires_at
+    );
+    let err = session3.verify(&pin, expires_at + 1).unwrap_err();
     assert_eq!(err, DomainError::SessionExpired);
+}
+
+#[test]
+fn test_pairing_session_max_attempts(){
+    use kfilesync_lib::domain::model::device::DeviceId;
+    use kfilesync_lib::domain::model::pairing::PairingSession;
+
+    let target = DeviceId("device_xyz".to_string());
+    let pin = "654321".to_string();
+    let mut session = PairingSession::new(target, pin.clone(), 9999999999u64);
+
+    // 3 wrong attempts should exhuast max_attempts
+    assert_eq!(session.verify("111111", 1000000000).unwrap_err(),DomainError::InvalidPinCode);
+    assert_eq!(session.verify("222222", 1000000000).unwrap_err(),DomainError::InvalidPinCode);
+    assert_eq!(session.verify("333333", 1000000000).unwrap_err(),DomainError::InvalidPinCode);
+
+    // Even correct PIN should be reject after max attempts
+    let err=session.verify(&pin, 1000000000).unwrap_err();
+    assert!(matches!(err, DomainError::BusinessRuleViolation(_)));
+    
 }

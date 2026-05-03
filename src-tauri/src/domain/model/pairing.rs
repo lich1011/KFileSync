@@ -8,6 +8,8 @@ pub struct PairingSession {
     pub target_device: DeviceId,
     pub pin_code: String,
     pub expires_at: u64,
+    pub attempts: u32,
+    pub max_attempts: u32,
 }
 
 impl PairingSession {
@@ -17,13 +19,23 @@ impl PairingSession {
             target_device,
             pin_code,
             expires_at,
+            attempts: 0,
+            max_attempts: 3,
         }
     }
 
-    pub fn verify(&self, code: &str, current_time: u64) -> Result<(), DomainError> {
+    pub fn verify(&mut self, code: &str, current_time: u64) -> Result<(), DomainError> {
         if current_time > self.expires_at {
             return Err(DomainError::SessionExpired);
         }
+
+        if self.attempts >= self.max_attempts {
+            return Err(DomainError::BusinessRuleViolation(
+                "Maximum PIN attempts exceeded".into()
+            ));
+        }
+        
+        self.attempts += 1;
         if self.pin_code != code {
             return Err(DomainError::InvalidPinCode);
         }

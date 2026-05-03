@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use async_trait::async_trait;
 
+use crate::domain::error::DomainError;
 use crate::domain::model::device::DeviceId;
 use crate::domain::model::file_entry::{FileEntry, SyncPlan};
 use crate::domain::model::share::{ShareId, SharePermission};
@@ -40,40 +41,40 @@ impl HttpSyncFlow {
 
 #[async_trait]
 impl SyncFlowTemplate for HttpSyncFlow {
-    async fn verify_permission(&self, share_id: &ShareId, peer: &DeviceId) -> Result<(), String> {
+    async fn verify_permission(&self, share_id: &ShareId, peer: &DeviceId) -> Result<(), DomainError> {
         let share = self.share_repo.find_by_id(share_id).await?
-            .ok_or_else(|| "Share not found".to_string())?;
+            .ok_or_else(|| DomainError::ShareNotFound(share_id.0.clone()))?;
 
         if !share.members.iter().any(|m| m.device_id == *peer) {
-            return Err("Peer is not a member of this share".to_string());
+            return Err(DomainError::PermissionDenied("Peer is not a member of this share".into()));
         }
         Ok(())
     }
 
-    async fn fetch_remote_index(&self, share_id: &ShareId, peer: &DeviceId) -> Result<Vec<FileEntry>, String> {
+    async fn fetch_remote_index(&self, share_id: &ShareId, peer: &DeviceId) -> Result<Vec<FileEntry>, DomainError> {
         let device = self.device_repo.find_by_id(peer.clone()).await?
-            .ok_or_else(|| "Device not found".to_string())?;
+            .ok_or_else(|| DomainError::DeviceNotFound(peer.0.clone()))?;
 
         let address = match device.state {
             crate::domain::model::device::DeviceState::Paired(data) => data.address,
-            _ => return Err("Device is not paired".to_string()),
+            _ => return Err(DomainError::DeviceNotTrusted(peer.0.clone())),
         };
 
         let json_str = self.network_client.fetch_remote_index(&address, crate::DEFAULT_PORT, &share_id.0).await?;
 
         let res: SyncIndexResponseDto = serde_json::from_str(&json_str)
-            .map_err(|e| format!("Failed to parse remote index: {}", e))?;
+            .map_err(|e| DomainError::Network(format!("Failed to parse remote index: {}", e)))?;
 
         Ok(res.entries)
     }
 
-    async fn generate_plan(&self, share_id: &ShareId, peer: &DeviceId, remote_index: &[FileEntry]) -> Result<SyncPlan, String> {
+    async fn generate_plan(&self, share_id: &ShareId, peer: &DeviceId, remote_index: &[FileEntry]) -> Result<SyncPlan, DomainError> {
         // Get local index
         let local_index = self.file_index_repo.find_all_by_share(share_id).await?;
 
         // Get local device's permission for this share
         let share = self.share_repo.find_by_id(share_id).await?
-            .ok_or_else(|| "Share not found".to_string())?;
+            .ok_or_else(|| DomainError::ShareNotFound(share_id.0.clone()))?;
 
         let permission = share.members.iter()
             .find(|m| m.device_id == *peer)
@@ -91,17 +92,17 @@ impl SyncFlowTemplate for HttpSyncFlow {
         Ok(plan)
     }
 
-    async fn execute_plan(&self, _plan: &SyncPlan, _peer: &DeviceId) -> Result<(), String> {
+    async fn execute_plan(&self, _plan: &SyncPlan, _peer: &DeviceId) -> Result<(), DomainError> {
         // TODO: Create TransferJobs for each file in to_pull/to_push
         Ok(())
     }
 
-    async fn update_versions(&self, _share_id: &ShareId, _plan: &SyncPlan) -> Result<(), String> {
+    async fn update_versions(&self, _share_id: &ShareId, _plan: &SyncPlan) -> Result<(), DomainError> {
         // TODO: Merge version vectors after successful transfer
         Ok(())
     }
 
-    async fn emit_events(&self, _plan: &SyncPlan) -> Result<(), String> {
+    async fn emit_events(&self, _plan: &SyncPlan) -> Result<(), DomainError> {
         // TODO: Publish SyncCompleted domain events
         Ok(())
     }
