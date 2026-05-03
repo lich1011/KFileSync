@@ -428,6 +428,7 @@ async fn handle_chunk_upload(
         let mut f = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
+        .truncate(false)  // chunk seek-write: preserve existing file content
         .open(&file_path)
         .map_err(|e| e.to_string())?;
 

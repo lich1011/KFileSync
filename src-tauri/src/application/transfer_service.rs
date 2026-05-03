@@ -59,11 +59,11 @@ impl TransferAppService {
                         item.chunk_manifest.chunks = hashed_chunks;
                     }
                     Ok(Err(e)) => {
-                        eprintln!("[TansferService] Hash failed for {}: {}", item.file_path, e);
+                        eprintln!("[TransferService] Hash failed for {}: {}", item.file_path, e);
                         
                     }
                     Err(e) => {
-                        eprintln!("[TansferService] Spawn error: {}", e);
+                        eprintln!("[TransferService] Spawn error: {}", e);
                     }
                 }
             }
@@ -128,30 +128,33 @@ impl TransferAppService {
                 }
 
                 
-                let _ = tokio::task::spawn_blocking({
+                tokio::task::spawn_blocking({
                     let path = item.file_path.clone();
                     let offset = chunk.offset;
                     let data = data.clone();
                     move || -> Result<(), DomainError> {
                         use std::io::{Seek, SeekFrom, Write};
                         let parent = std::path::Path::new(&path).parent();
-                        if let Some(p) = parent{
+                        if let Some(p) = parent {
                             let _ = std::fs::create_dir_all(p);
                         }
                         let mut f = std::fs::OpenOptions::new()
-                        .create(true).write(true)
-                        .open(&path)
-                        .map_err(|e| DomainError::FileSystem(e.to_string()))?;
+                            .create(true)
+                            .write(true)
+                            .truncate(false)  // chunk-based seek-write: keep existing file content
+                            .open(&path)
+                            .map_err(|e| DomainError::FileSystem(e.to_string()))?;
 
                         f.seek(SeekFrom::Start(offset))
-                        .map_err(|e| DomainError::FileSystem(e.to_string()))?;
+                            .map_err(|e| DomainError::FileSystem(e.to_string()))?;
 
                         f.write_all(&data)
-                        .map_err(|e| DomainError::FileSystem(e.to_string()))?;
+                            .map_err(|e| DomainError::FileSystem(e.to_string()))?;
                         Ok(())
                     }
                 }).await
-                .map_err(|e| DomainError::FileSystem(e.to_string()))?;
+                .map_err(|e| DomainError::FileSystem(e.to_string()))? // JoinError
+                ?;  // propagate inner DomainError from file write
 
                 current_job = current_job.record_chunk_done(&item.file_id, chunk.index)?;
                 self.transfer_repo.save(current_job.clone()).await?;

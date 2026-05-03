@@ -265,12 +265,12 @@ pub fn run() {
 
                 let cutoff = now.saturating_sub(TOMBSTONE_TTL_SECS);
 
-                match file_index_repo_ref.cleanup_expired_tombstones(cutoff as i64).await {
+                match file_index_repo_ref.cleanup_expired_tombstones(i64::try_from(cutoff).unwrap_or(i64::MAX)).await {
                     Ok(count) if count > 0 => {
-                        println!("[TombstoneCleanup] Purged {} expired tombstones", count);
+                        println!("[TombstoneCleanup] Purged {count} expired tombstones");
                     }
                     Err(e) => {
-                        eprintln!("[TombstoneCleanup] Error: {:?}", e);
+                        eprintln!("[TombstoneCleanup] Error: {e:?}");
                     }
                     _ => {}
                 }

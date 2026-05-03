@@ -58,15 +58,3 @@ pub enum DomainError {
 
 pub type DomainResult<T> = Result<T, DomainError>;
 
-// impl std::fmt::Display for DomainError {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         match self {
-//             Self::InvalidStateTransition(msg) => write!(f, "Invalid state transition: {}", msg),
-//             Self::SessionExpired => write!(f, "Pairing session has expired"),
-//             Self::InvalidPinCode => write!(f, "PIN code does not match"),
-//             Self::BusinessRuleViolation(msg) => write!(f, "Business rule violation: {}", msg),
-//         }
-//     }
-// }
-
-// impl std::error::Error for DomainError {}

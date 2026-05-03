@@ -49,7 +49,7 @@ impl DeviceAppService {
         }
     }
 
-    fn sweep_expried_sessions(&self) {
+    fn sweep_expired_sessions(&self) {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         let mut sessions = self.active_sessions.lock().unwrap();
         sessions.retain(|_, session| session.expires_at > now);
@@ -109,7 +109,7 @@ impl DeviceAppService {
     }
 
     pub async fn initiate_pairing(&self, target: &DeviceId) -> Result<PairingSession, DomainError> {
-        self.sweep_expried_sessions();
+        self.sweep_expired_sessions();
 
         let device = self.repo.find_by_id(target.clone()).await?
             .ok_or_else(|| DomainError::DeviceNotFound(target.0.clone()))?;
@@ -154,22 +154,19 @@ impl DeviceAppService {
     ) -> Result<(), DomainError> {
         let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
        
-        let verify_result ={
+        let verify_result = {
             let mut sessions = self.active_sessions.lock().unwrap();
             let session = sessions.get_mut(target_device_id)
                 .ok_or_else(|| DomainError::NotFound(format!("No active pairing session for device {}", target_device_id.0)))?;
             
             let result = session.verify(pin_code, current_time);
 
-            if result.is_ok() || session.attempts >= session.max_attempts{
-                let target = session.target_device.clone();
-                let _ = session;
-                self.active_sessions.lock().unwrap().remove(&target);
-                result
-            } else {
-                result
+            if result.is_ok() || session.attempts >= session.max_attempts {
+                // Remove in the same lock scope — no double-lock, no deadlock
+                sessions.remove(target_device_id);
             }
-
+            result
+            // MutexGuard `sessions` is dropped here
         };
 
         verify_result?;
