@@ -117,38 +117,86 @@ impl SyncFlowTemplate for HttpSyncFlow {
     async fn execute_plan(&self, plan: &SyncPlan, peer: &DeviceId) -> Result<(), DomainError> {
         // Create a SyncPull TransferJob for files we need to pull from the peer
         if !plan.to_pull.is_empty() {
-            let requests = Self::make_file_requests(&plan.to_pull);
-            let job = TransferJob::create_from_files(
+            let pull_files: Vec<FileRequest> = plan.to_pull.iter().map(|action| {
+                FileRequest {
+                    file_path: action.entry.path.clone(),
+                    file_size: action.entry.size,
+                    sha256: action.entry.sha256.clone().unwrap_or_default(),
+                }
+            }).collect();
+
+            let mut job = TransferJob::create_from_files(
                 TransferType::SyncPull,
                 peer.clone(),
-                requests,
+                pull_files,
                 self.chunking_strategy.as_ref(),
             );
-            let job_id = job.job_id.clone();
-            let peer_clone = peer.clone();
+            job.share_id = plan.to_pull.first().map(|a| a.entry.share_id.clone());
             self.transfer_repo.save(job).await?;
-            self.event_bus.publish(Box::new(TransferRequested {
-                job_id,
-                peer: peer_clone,
-            }));
         }
 
         // Create a SyncPush TransferJob for files we need to push to the peer
         if !plan.to_push.is_empty() {
-            let requests = Self::make_file_requests(&plan.to_push);
-            let job = TransferJob::create_from_files(
+            let push_files: Vec<FileRequest> = plan.to_push.iter().map(|action| {
+                FileRequest {
+                    file_path: action.entry.path.clone(),
+                    file_size: action.entry.size,
+                    sha256: action.entry.sha256.clone().unwrap_or_default(),
+                }
+            }).collect();
+
+            let mut job = TransferJob::create_from_files(
                 TransferType::SyncPush,
                 peer.clone(),
-                requests,
+                push_files,
                 self.chunking_strategy.as_ref(),
             );
-            let job_id = job.job_id.clone();
-            let peer_clone = peer.clone();
+            job.share_id = plan.to_push.first().map(|a| a.entry.share_id.clone());
             self.transfer_repo.save(job).await?;
-            self.event_bus.publish(Box::new(TransferRequested {
-                job_id,
-                peer: peer_clone,
-            }));
+        }
+
+        for conflict in &plan.conflicts {
+            match &conflict.resolution {
+                ConflictResolution::KeepBoth { conflict_copy_path } => {
+                    self.file_index_repo.save_conflict(conflict).await?;
+
+                    let files = vec![FileRequest {
+                        file_path: conflict_copy_path.clone(),
+                        file_size: conflict.remote.size,
+                        sha256: conflict.remote.sha256.clone().unwrap_or_default(),
+                    }];
+
+                    let mut job = TransferJob::create_from_files(
+                        TransferType::SyncPull,
+                        peer.clone(),
+                        files,
+                        self.chunking_strategy.as_ref(),
+                    );
+                    job.share_id = Some(conflict.local.share_id.clone());
+                    self.transfer_repo.save(job).await?;
+                }
+                ConflictResolution::KeepRemote => {
+                    self.file_index_repo.save_conflict(conflict).await?;
+
+                    let files = vec![FileRequest {
+                        file_path: conflict.remote.path.clone(),
+                        file_size: conflict.remote.size,
+                        sha256: conflict.remote.sha256.clone().unwrap_or_default(),
+                    }];
+
+                    let mut job = TransferJob::create_from_files(
+                        TransferType::SyncPull,
+                        peer.clone(),
+                        files,
+                        self.chunking_strategy.as_ref(),
+                    );
+                    job.share_id = Some(conflict.remote.share_id.clone());
+                    self.transfer_repo.save(job).await?;
+                }
+                ConflictResolution::KeepLocal | ConflictResolution::Pending => {
+                    self.file_index_repo.save_conflict(conflict).await?;
+                }
+            }
         }
 
         Ok(())
@@ -157,17 +205,58 @@ impl SyncFlowTemplate for HttpSyncFlow {
     async fn update_versions(&self, share_id: &ShareId, plan: &SyncPlan) -> Result<(), DomainError> {
         // Merge remote version vectors into local index entries for successfully resolved items
         for action in &plan.to_pull {
-            if let Some(local_entry) = self.file_index_repo.find_by_path(share_id, &action.path).await? {
-                let merged = local_entry.apply_remote_version(&action.entry);
-                self.file_index_repo.save(&merged).await?;
+            let local_entry: Option<FileEntry> = self.file_index_repo.find_by_path(share_id, &action.path).await?;
+
+            let updated: FileEntry = match local_entry {
+                Some(entry) => entry.apply_remote_version(&action.entry),
+                None => action.entry.clone(),
+            };
+            self.file_index_repo.save(&updated).await?;
+        }
+
+        for action in &plan.to_push {
+            let local_entry: Option<FileEntry> = self.file_index_repo.find_by_path(share_id, &action.path).await?;
+            if let Some(entry) = local_entry {
+                let updated: FileEntry = entry.apply_remote_version(&action.entry);
+                self.file_index_repo.save(&updated).await?;
+            }
+        }
+
+        for conflict in &plan.conflicts {
+            let merged_version: VersionVector = conflict.local.version.merge(&conflict.remote.version);
+            let local_entry: Option<FileEntry> = self.file_index_repo.find_by_path(share_id, &conflict.path).await?;
+            if let Some(mut entry) = local_entry {
+                entry.version = merged_version;
+                self.file_index_repo.save(&entry).await?;
             }
         }
         Ok(())
     }
 
+
     async fn emit_events(&self, _plan: &SyncPlan) -> Result<(), DomainError> {
         // TransferRequested events are published in execute_plan; sync completion
         // events will be published by transfer_service when jobs finish.
+        let files_synced: u32 = (plan.to_pull.len() + plan.to_push.len()) as u32;
+
+        if let Some(first_action: &SyncAction) = plan.to_pull.first().or(plan.to_push.first()) {
+            self.event_bus.publish(Box::new(SyncCompleted {
+                share_id: first_action.entry.share_id.clone(),
+                files_synced,
+            }));
+        }
+
+        for conflict in &plan.conflicts {
+            self.event_bus.publish(Box::new(ConflictDetected {
+                share_id: conflict.local.share_id.clone(),
+                path: conflict.path.clone(),
+                local_version: conflict.local.version.clone(),
+                remote_version: conflict.remote.version.clone(),
+            }));
+        }
+
         Ok(())
     }
+
+
 }
