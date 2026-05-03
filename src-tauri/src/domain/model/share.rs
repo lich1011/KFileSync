@@ -66,7 +66,7 @@ impl Share {
         sync_mode: SyncMode,
         created_by: DeviceId,
     ) -> Self {
-        let created_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let created_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         let members = vec![ShareMember {
             device_id: created_by.clone(),
             permission: SharePermission::ReadWrite,
@@ -98,7 +98,7 @@ impl Share {
             ));
         }
 
-        let authorized_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let authorized_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         self.members.push(ShareMember {
             device_id,
             permission,

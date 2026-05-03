@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use reqwest::{Client, ClientBuilder};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64,Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -22,57 +23,162 @@ pub struct ReqwestNetworkClient {
 struct TlsRotationConfig {
     max_age: Duration,
     max_byte: u64,
-    trusted_fingerprints: Mutex<std::collections::HashSet<String>>,
+    trusted_fingerprints: Arc<Mutex<std::collections::HashSet<String>>>,
+}
+
+mod cert_pinning {
+    use std::sync::{Arc, Mutex};
+    use std::collections::HashSet;
+    use sha2::{Sha256, Digest};
+    use rustls::client::danger::{ServerCertVerifier, ServerCertVerified, HandshakeSignatureValid};
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use rustls::{DigitallySignedStruct, SignatureScheme, Error};
+
+    #[derive(Debug)]
+    pub struct FingerprintVerifier {
+        trusted: Arc<Mutex<HashSet<String>>>,
+        schemes: Vec<SignatureScheme>,
+    }
+
+    impl FingerprintVerifier {
+        pub fn new(trusted: Arc<Mutex<HashSet<String>>>) -> Self {
+            Self {
+                trusted,
+                schemes: vec![
+                    SignatureScheme::ECDSA_NISTP256_SHA256,
+                    SignatureScheme::ECDSA_NISTP384_SHA384,
+                    SignatureScheme::ED25519,
+                    SignatureScheme::RSA_PSS_SHA256,
+                    SignatureScheme::RSA_PSS_SHA384,
+                    SignatureScheme::RSA_PSS_SHA512,
+                    SignatureScheme::RSA_PKCS1_SHA256,
+                    SignatureScheme::RSA_PKCS1_SHA384,
+                    SignatureScheme::RSA_PKCS1_SHA512,
+                ],
+            }
+        }
+    }
+
+    impl ServerCertVerifier for FingerprintVerifier {
+        fn verify_server_cert(
+            &self,
+            end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: UnixTime,
+        ) -> Result<ServerCertVerified, Error> {
+            let hash = Sha256::digest(end_entity.as_ref());
+            let fingerprint: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+
+            let trusted = self.trusted.lock()
+                .map_err(|_| Error::General("Lock poisoned".into()))?;
+
+            // During initial pairing, no fingerprints are registered yet.
+            // Allow connection if the trust store is empty (bootstrapping).
+            if trusted.is_empty() {
+                return Ok(ServerCertVerified::assertion());
+            }
+
+            if trusted.contains(&fingerprint) {
+                Ok(ServerCertVerified::assertion())
+            } else {
+                Err(Error::General(format!(
+                    "Certificate fingerprint {} not in trusted set", fingerprint
+                )))
+            }
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            rustls::crypto::verify_tls12_signature(
+                message,
+                cert,
+                dss,
+                &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
+            )
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            rustls::crypto::verify_tls13_signature(
+                message,
+                cert,
+                dss,
+                &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
+            )
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            self.schemes.clone()
+        }
+    }
 }
 
 impl ReqwestNetworkClient {
     pub fn new() -> Result<Self, DomainError> {
         // Accept self-signed certs because devices generate their own certs.
         // Real security is done via SHA-256 fingerprint pinning after pairing.
-       let client = Self::build_client()?;
+       let trusted_fingerprints = Arc::new(Mutex::new(std::collections::HashSet::new()));
+       let client = Self::build_client(trusted_fingerprints.clone())?;
 
         Ok(Self { 
             client: Mutex::new(client),
             tls_config: Arc::new(TlsRotationConfig {
                 max_age: Duration::from_secs(3600),
                 max_byte: 1_073_741_824,
-                trusted_fingerprints: Mutex::new(std::collections::HashSet::new()),
+                trusted_fingerprints,
             }),
             created_at: Mutex::new(Instant::now()),
             bytes_transferred: AtomicU64::new(0),  
         })
     }
 
-    fn build_client() -> Result<Client, DomainError> {
+    fn build_client(trusted_fingerprints: Arc<Mutex<HashSet<String>>>) -> Result<Client, DomainError> {
+        let verifier =  cert_pinning::FingerprintVerifier::new(trusted_fingerprints);
+
+        let tls_config = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(verifier))
+            .with_no_client_auth();
+
         ClientBuilder::new()
-            .danger_accept_invalid_certs(true)
+            .tls_backend_preconfigured(tls_config)
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(net_err)
     }
 
-    pub fn add_trusted_fingerprint(&self, device_id: &str) {
+    pub fn add_trusted_fingerprint(&self, fingerprint: &str) {
         if let Ok(mut fps) = self.tls_config.trusted_fingerprints.lock(){
-            fps.insert(device_id.to_string());
+            fps.insert(fingerprint.to_string());
         }
     }
 
-    pub fn remove_trusted_fingerprint(&self, device_id: &str) {
+    pub fn remove_trusted_fingerprint(&self, fingerprint: &str) {
         if let Ok(mut fps) = self.tls_config.trusted_fingerprints.lock(){
-            fps.remove(device_id);
+            fps.remove(fingerprint);
         }
     }  
     
-    fn  maybe_rotate(&self) {
+    fn maybe_rotate(&self) {
         let should_rotate =  {
             let created_at = self.created_at.lock().unwrap();
             let elapsed = created_at.elapsed();
             let bytes = self.bytes_transferred.load(Ordering::Relaxed);
-            elapsed >= self.tls_config.max_age || bytes >= self.tls_config.max_byte 
+            elapsed >= self.tls_config.max_age || bytes >= self.tls_config.max_byte
         };
 
         if should_rotate {
-            if let Ok(new_client) = Self::build_client() {
+            if let Ok(new_client) = Self::build_client(self.tls_config.trusted_fingerprints.clone()) {
                 if let Ok(mut client) = self.client.lock() {
                     *client = new_client;
                 }
@@ -103,7 +209,7 @@ impl ReqwestNetworkClient {
     }
 
     fn now_timestamp() -> u64 { 
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
     }
 }
 

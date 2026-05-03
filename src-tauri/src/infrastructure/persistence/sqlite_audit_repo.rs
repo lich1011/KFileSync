@@ -1,16 +1,15 @@
-use rusqlite::Connection;
-use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use crate::domain::port::audit_repo::{AuditLogRepository, AuditEntry};
 use crate::domain::error::DomainError;
+use super::Dbpool;
 
 pub struct SqliteAuditLogRepository {
-    conn: Arc<Mutex<Connection>>,
+    pool: Dbpool,
 }
 
 impl SqliteAuditLogRepository {
-    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
-        Self { conn }
+    pub fn new(pool: Dbpool) -> Self {
+        Self { pool }
     }
 }
 
@@ -21,7 +20,7 @@ fn db_err(e: impl std::fmt::Display) -> DomainError {
 #[async_trait]
 impl AuditLogRepository for SqliteAuditLogRepository {
     async fn append(&self, entry: &AuditEntry) -> Result<(), DomainError> {
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
         let id = entry.id.clone();
         let timestamp = entry.timestamp as i64;
         let event_type = entry.event_type.clone();
@@ -29,7 +28,7 @@ impl AuditLogRepository for SqliteAuditLogRepository {
         let details = entry.details.clone();
 
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(db_err)?;
+            let conn = pool.get().map_err(db_err)?;
             conn.execute(
                 "INSERT INTO audit_logs (id, timestamp, event_type, aggregate_id, details) VALUES (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![id, timestamp, event_type, aggregate_id, details],

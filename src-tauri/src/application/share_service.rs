@@ -114,10 +114,12 @@ impl ShareAppService {
             // COMPENSATION: Failed to persist after peer accepted.
             // In a real system, we must send a CANCEL/ROLLBACK message to the peer here.
             eprintln!("[ShareService] Failed to persist. Rolling back peer {}", peer_id.0);
-            let _ = self.network_client.cancel_share_invite(
+            if let Err(rollbakc_err) = self.network_client.cancel_share_invite(
                 &address, crate::DEFAULT_PORT,
                 &share_id.0, &self.local_device_id.0
-            ).await;
+            ).await{
+                eprintln!("[ShareService] CRITICAL: Saga rollback also failed for peer {}: {}. Manual cleanup required.", peer_id.0, rollbakc_err);
+            };
             return Err(e);
         }
 

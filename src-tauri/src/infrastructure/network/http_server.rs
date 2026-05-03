@@ -71,7 +71,11 @@ pub async fn start_server(
         .route("/api/lansync/v1/transfer/request", post(handle_transfer_request))
         .route("/api/lansync/v1/transfer/{job_id}/chunk/{file_id}/{chunk_index}", get(handle_chunk_download))
         .route("/api/lansync/v1/transfer/{job_id}/chunk", post(handle_chunk_upload))
-        .layer(CorsLayer::permissive())
+        .layer(CorsLayer::new()
+            .allow_origin(tower_http::cors::Any)
+            .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+            .allow_headers([axum::http::header::CONTENT_TYPE]))
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(64 * 1024 * 1024))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
@@ -104,7 +108,15 @@ async fn handle_pair_request(
     println!("[Server] Received pair request from {} (IP: {})", req.device_id, peer_addr.ip());
 
     if let Err(e) = state.nonce_validator.validate(&req.nonce, req.timestamp) {
-        eprintln!("[Server] Invalid pair request: {}", e);
+        return Json(
+            PairResponseDto { 
+                status: format!("rejected: {}", e), 
+                device_id: String::new(), 
+                alias: String::new(), 
+                platform: String::new(), 
+                fingerprint_short: String::new() 
+            }
+        );
     }
 
     // Save requesting device as Discovered (if not already known)

@@ -1,3 +1,4 @@
+use std::fmt::format;
 use std::sync::Arc;
 use crate::domain::model::transfer::{TransferJob, TransferType, TransferError, FileRequest, JobId};
 use crate::domain::model::device::DeviceId;
@@ -59,11 +60,14 @@ impl TransferAppService {
                         item.chunk_manifest.chunks = hashed_chunks;
                     }
                     Ok(Err(e)) => {
-                        eprintln!("[TransferService] Hash failed for {}: {}", item.file_path, e);
-                        
+                        return Err(DomainError::IntegrityError((
+                            format!("Hash computation failed for {}: {}", item.file_path, e)
+                        )));
                     }
                     Err(e) => {
-                        eprintln!("[TransferService] Spawn error: {}", e);
+                       return Err(DomainError::IntegrityError((
+                            format!("Hash computation spawn error: {}", e)
+                        )));
                     }
                 }
             }
@@ -159,6 +163,17 @@ impl TransferAppService {
                 current_job = current_job.record_chunk_done(&item.file_id, chunk.index)?;
                 self.transfer_repo.save(current_job.clone()).await?;
                 total_bytes += chunk.size as u64;
+            }
+        }
+
+        for item in &item_snapshot{
+            if !item.sha256.is_empty(){
+                let path = item.file_path.clone();
+                let expected = item.sha256.clone();
+                let actual = tokio::task::spawn_blocking(move ||{
+                    ChunkHasher::compute_sha256(std::path::Path::new(&path))
+                }).await
+                .map_err(|e| DomainError::FileSystem(e.to_string()))??;
             }
         }
 

@@ -46,11 +46,9 @@ impl IndexerService {
     /// If already watching, returns Ok immediately (idempotent).
     pub async fn start_watching(&self, share_id: &ShareId) -> Result<(), DomainError> {
         // Guard: prevent duplicate watchers for the same share
+        if self.active_watchers.lock().unwrap().contains_key(share_id)
         {
-            let watchers = self.active_watchers.lock().unwrap();
-            if watchers.contains_key(share_id) {
-                return Ok(()); // Already watching
-            }
+          return Ok(()); // Already watching
         }
 
         let share = self.share_repo.find_by_id(share_id).await?
@@ -61,8 +59,20 @@ impl IndexerService {
         // Use share.local_path (now a String) correctly as a Path reference
         let watch_handle = self.file_watcher.watch(Path::new(&share.local_path), tx).await?;
 
-        // Register the handle
-        self.active_watchers.lock().unwrap().insert(share_id.clone(), watch_handle);
+        //Atomic insert:: re-check under lock to prevent TOCTOU race
+        let race_lost = {
+            let mut watchers = self.active_watchers.lock().unwrap();
+            if watchers.contains_key(share_id){
+                true
+            }else{
+                watchers.insert(share_id.clone(), watch_handle.clone());
+                false
+            }
+        };
+        if race_lost {
+            let _ = self.file_watcher.unwatch(watch_handle).await;
+            return Ok(());
+        }
 
         // Spawn background task to process events
         let file_index_repo = self.file_index_repo.clone();
@@ -177,7 +187,7 @@ impl IndexerService {
                             }
                         }
                         Err(e) => {
-                            eprintln!("Failed to process file {}: {}", path_str, e);
+                            eprintln!("[IndexerService] Skipping file '{}' due to hash error: {}", path_str, e);
                         }
                     }
 

@@ -1,33 +1,33 @@
-use rusqlite::{Connection, OptionalExtension};
-use std::sync::{Arc, Mutex};
+use rusqlite::OptionalExtension;
 use async_trait::async_trait;
 use crate::domain::model::transfer::{JobId, TransferJob, TransferItem, TransferType, TransferState};
 use crate::domain::model::device::DeviceId;
 use crate::domain::port::transfer_repo::TransferRepository;
 use crate::domain::error::DomainError;
+use super::Dbpool;
 
 fn db_err(e: impl std::fmt::Display) -> DomainError {
     DomainError::Persistence(e.to_string())
 }  
 
 pub struct SqliteTransferRepository {
-    conn: Arc<Mutex<Connection>>,
+    poll: Dbpool,
 }
 
 impl SqliteTransferRepository {
-    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
-        Self { conn } 
+    pub fn new(poll: Dbpool) -> Self {
+        Self { poll } 
     }
 }
 
 #[async_trait]
 impl TransferRepository for SqliteTransferRepository {
     async fn find_by_id(&self, job_id: &JobId) -> Result<Option<TransferJob>,   DomainError> {
-        let conn = self.conn.clone();
+        let poll = self.poll.clone();
         let job_id = job_id.clone();
 
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(db_err)?;
+            let conn = poll.get().map_err(db_err)?;
         
             let mut stmt = conn.prepare("SELECT session_id, job_type, peer_device_id, share_id, state_json, created_at FROM transfer_jobs WHERE job_id = ?1").map_err(db_err)?;
         
@@ -82,10 +82,10 @@ impl TransferRepository for SqliteTransferRepository {
     }
 
     async fn save(&self, job: TransferJob) -> Result<(), DomainError> {
-        let conn = self.conn.clone();
+        let poll = self.poll.clone();
 
         tokio::task::spawn_blocking(move || {
-            let mut conn = conn.lock().map_err(db_err)?;
+            let mut conn = poll.get().map_err(db_err)?;
             let tx = conn.transaction().map_err(db_err)?;
         
             let job_type_str = match job.job_type {
@@ -127,10 +127,10 @@ impl TransferRepository for SqliteTransferRepository {
     }
 
     async fn find_incomplete_jobs(&self) -> Result<Vec<TransferJob>, DomainError> {
-        let conn =self.conn.clone();
+        let poll =self.poll.clone();
 
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(db_err)?;
+            let conn = poll.get().map_err(db_err)?;
             
             let mut stmt = conn.prepare(
                 "SELECT j.job_id, j.session_id, j.job_type, j.peer_device_id, j.share_id, j.state_json, j.status, j.created_at 
@@ -195,11 +195,11 @@ impl TransferRepository for SqliteTransferRepository {
     }
 
     async fn find_actions_by_peer(&self, device_id: &DeviceId) -> Result<Vec<TransferJob>, DomainError> {
-        let conn = self.conn.clone();
+        let poll = self.poll.clone();
         let device_id = device_id.clone();
 
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(db_err)?;
+            let conn = poll.get().map_err(db_err)?;
 
             let mut stmt = conn.prepare(
                 "SELECT j.job_id, j.session_id, j.job_type, j.peer_device_id, j.share_id, j.state_json, j.created_at 

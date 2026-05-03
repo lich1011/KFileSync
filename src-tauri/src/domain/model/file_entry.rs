@@ -83,7 +83,7 @@ pub struct FileEntry {
 
 impl FileEntry {
     pub fn new(share_id: ShareId, path: String, entry_type: EntryType, device_id: &DeviceId) -> Self {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         Self {
             share_id,
             path,
@@ -104,14 +104,14 @@ impl FileEntry {
         self.sha256 = Some(sha256);
         self.blocks = blocks;
         self.modified_by = device_id.clone();
-        self.modified_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        self.modified_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         self.version = self.version.increment(device_id);
         self
     }
 
     pub fn mark_deleted(mut self, device_id: &DeviceId) -> Self {
         self.deleted = true;
-        self.deleted_at = Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs());
+        self.deleted_at = Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs());
         self.modified_by = device_id.clone();
         self.version = self.version.increment(device_id);
         self

@@ -100,6 +100,7 @@ pub struct TransferJob {
     pub created_at: u64,
 }
 
+#[derive(Clone, Debug)]
 pub struct FileRequest {
     pub file_path: String,
     pub file_size: u64,
@@ -167,7 +168,7 @@ impl TransferJob {
             share_id: None,
             state: TransferState::Pending,
             items,
-            created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
         }
     }
 
@@ -186,7 +187,7 @@ impl TransferJob {
             share_id: None,
             state: TransferState::Pending,
             items,
-            created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
         }
     }
 
@@ -195,7 +196,7 @@ impl TransferJob {
             return Err(DomainError::InvalidStateTransition("Only Pending jobs can be accepted"));
         }
         self.state = TransferState::Active {
-            started_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            started_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
         };
         Ok(self)
     }
@@ -242,7 +243,7 @@ impl TransferJob {
             return Err(DomainError::InvalidStateTransition("Only Paused jobs can be resumed"));
         }
         self.state = TransferState::Active {
-            started_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            started_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
         };
         Ok(self)
     }
@@ -261,7 +262,7 @@ impl TransferJob {
             return Err(DomainError::InvalidStateTransition("Job must be in Verifying state to be completed"));
         }
         self.state = TransferState::Completed {
-            completed_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            completed_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
         };
         for item in &mut self.items {
             item.status = TransferItemStatus::Completed;

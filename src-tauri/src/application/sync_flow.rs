@@ -8,6 +8,8 @@ use crate::domain::model::share::ShareId;
 pub trait SyncFlowTemplate {
     /// Template method for synchronization execution flow
     async fn execute(&self, share_id: &ShareId, peer: &DeviceId) -> Result<SyncPlan, DomainError> {
+        // Steps are ordered so that partial failure is safe: if execute_plan fails,
+        // version are not updated and the paln can be re-executed on next sync cycle.
         self.verify_permission(share_id, peer).await?;
         
         // 1. Fetch remote index

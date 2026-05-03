@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{self, HashMap};
 use std::sync::Mutex;
 use std::time::{UNIX_EPOCH, SystemTime};
 
@@ -37,6 +37,16 @@ impl NonceValidator {
         }
 
         seen.insert(nonce.to_string(), timestamp);
+        const MAX_NONCES: usize = 10_000;
+        if seen.len() > MAX_NONCES {
+            let mut entries:Vec<_> = seen.iter().map(|(k,v)|(k.clone(), *v)).collect();
+            entries.sort_by_key(|(_,ts)| *ts);
+            let to_move = seen.len() - MAX_NONCES;
+            for(key, _) in entries.into_iter().take(to_move){
+                seen.remove(&key);
+            }
+        }
+
         Ok(())
     }
 

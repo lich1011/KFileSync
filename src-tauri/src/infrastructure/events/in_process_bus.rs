@@ -14,7 +14,7 @@ impl Default for InProcessEventBus {
 
 impl InProcessEventBus {
     pub fn new() -> Self {
-        let (sender, _) = broadcast::channel(100);
+        let (sender, _) = broadcast::channel(1024);
         Self { sender }
     }
 

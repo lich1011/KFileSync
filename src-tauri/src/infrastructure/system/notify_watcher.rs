@@ -41,7 +41,7 @@ impl FileWatcher for NotifyWatcherAdapter {
             if let Ok(event) = res {
                 let timestamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
+                    .unwrap_or_default()
                     .as_secs();
 
                 // Map notify events to our domain events
@@ -68,7 +68,9 @@ impl FileWatcher for NotifyWatcherAdapter {
                         };
 
                         // Send event to channel (ignore error if receiver is dropped)
-                        let _ = tx_clone.blocking_send(domain_event);
+                        if tx_clone.blocking_send(domain_event).is_err(){
+                            break;
+                        };
                     }
                 }
             }

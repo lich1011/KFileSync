@@ -25,7 +25,15 @@ impl FileKeyStore {
 impl KeyStore for FileKeyStore {
     fn store_private_key(&self, id: &DeviceId, key: &[u8]) -> Result<(), DomainError> {
         let path = self.key_path(id);
-        fs::write(path, key).map_err(|e| DomainError::Security(format!("Failed to write key: {}", e)))
+        fs::write(&path, key).map_err(|e| DomainError::Security(format!("Failed to write key: {}", e)))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(&path, perms)
+                .map_err(|e| DomainError::Security(format!("Failed to set key file permission: {}",e)))?;
+        }
+        Ok(())
     }
 
     fn load_private_key(&self, id: &DeviceId) -> Result<Vec<u8>, DomainError> {

@@ -1,23 +1,23 @@
 use async_trait::async_trait;
 use rusqlite::{params, OptionalExtension, Row};
-use std::sync::{Arc, Mutex};
 use crate::domain::error::DomainError;
 use crate::domain::model::device::DeviceId;
 use crate::domain::model::file_entry::{BlockList, ConflictResolution, EntryType, FileEntry, SyncConflict, VersionVector};
 use crate::domain::model::share::ShareId;
 use crate::domain::port::file_index_repo::{FileIndexRepository, LocalBlockCopy};
+use super::Dbpool;
 
 fn db_err(e: impl std::fmt::Display) -> DomainError {
     DomainError::Persistence(e.to_string())
 }   
 
 pub struct SqliteFileIndexRepository {
-    conn: Arc<Mutex<rusqlite::Connection>>,
+    pool: Dbpool,
 }
 
 impl SqliteFileIndexRepository {
-    pub fn new(conn: Arc<Mutex<rusqlite::Connection>>) -> Self {
-        Self { conn }
+    pub fn new(pool: Dbpool) -> Self {
+        Self { pool }
     }
 
     fn row_to_file_entry(row: &Row) -> rusqlite::Result<FileEntry> {
@@ -29,11 +29,17 @@ impl SqliteFileIndexRepository {
         };
 
         let version_str: String = row.get("version_vector")?;
-        let version: VersionVector = serde_json::from_str(&version_str).unwrap_or_default();
+        let version: VersionVector = serde_json::from_str(&version_str).unwrap_or_else( |e|{
+            eprint!("SqliteFileIndex WARNING: Corrupt version_vector JSON, using empty:{}", e);
+            VersionVector::default()
+        });
 
         let blocks_str: Option<String> = row.get("blocks")?;
         let blocks = if let Some(s) = blocks_str {
-            serde_json::from_str(&s).unwrap_or_default()
+            serde_json::from_str(&s).unwrap_or_else(|e|{
+                eprint!("SqliteFileIndex WARNING: Corrupt blocks JSON, using empty:{}", e);
+                BlockList::default()
+            })
         } else {
             BlockList::default()
         };
@@ -99,11 +105,11 @@ impl SqliteFileIndexRepository {
 #[async_trait]
 impl FileIndexRepository for SqliteFileIndexRepository {
     async fn save(&self, entry: &FileEntry) -> Result<(), DomainError> {
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
         let entry = entry.clone();
 
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(db_err)?;
+            let conn = pool.get().map_err(db_err)?;
 
             let entry_type_str = match entry.entry_type {
                 EntryType::File => "file",
@@ -151,12 +157,12 @@ impl FileIndexRepository for SqliteFileIndexRepository {
     }
 
     async fn find_by_path(&self, share_id: &ShareId, path: &str) -> Result<Option<FileEntry>, DomainError> {
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
         let share_id = share_id.clone();
         let path = path.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(db_err)?;
+            let conn = pool.get().map_err(db_err)?;
             let mut stmt = conn.prepare("SELECT * FROM file_entries WHERE share_id = ?1 AND path = ?2")
                 .map_err(db_err)?;
             
@@ -169,11 +175,11 @@ impl FileIndexRepository for SqliteFileIndexRepository {
     }
 
     async fn find_all_by_share(&self, share_id: &ShareId) -> Result<Vec<FileEntry>, DomainError> {
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
         let share_id = share_id.clone();
 
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(db_err)?;
+            let conn = pool.get().map_err(db_err)?;
             let mut stmt = conn.prepare("SELECT * FROM file_entries WHERE share_id = ?1")
                 .map_err(db_err)?;  
         
@@ -190,12 +196,12 @@ impl FileIndexRepository for SqliteFileIndexRepository {
     }
 
     async fn find_blocks_by_hash(&self, share_id: &ShareId, hash: &str) -> Result<Vec<LocalBlockCopy>, DomainError> {
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
         let share_id = share_id.clone();
         let hash = hash.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(db_err)?;
+            let conn = pool.get().map_err(db_err)?;
             
         // This is a slow operation in SQLite unless we create a virtual table or extract blocks into a separate table.
         // For MVP, since `blocks` is stored as JSON, doing a LIKE query is a hack but works for deduplication fallback.
@@ -222,18 +228,18 @@ impl FileIndexRepository for SqliteFileIndexRepository {
                                 source_path: path.clone(),
                                 source_offset: current_offset,
                             });
+                        }
+                        current_offset += b.size as u64;
                     }
-                    current_offset += b.size as u64;
                 }
             }
-        }
 
-        Ok(copies)
+            Ok(copies)
         }).await.map_err(db_err)?
     }
 
     async fn save_conflict(&self, conflict: &SyncConflict) -> Result<(), DomainError> {
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
         let conflict_path = conflict.path.clone();
         let local_json = serde_json::to_string(&conflict.local).map_err(db_err)?;
         let remote_json = serde_json::to_string(&conflict.remote).map_err(db_err)?;
@@ -241,7 +247,7 @@ impl FileIndexRepository for SqliteFileIndexRepository {
         let share_id = conflict.local.share_id.clone();
 
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(db_err)?;
+            let conn = pool.get().map_err(db_err)?;
             let conflict_id = uuid::Uuid::new_v4().to_string();
 
             conn.execute(
@@ -263,11 +269,11 @@ impl FileIndexRepository for SqliteFileIndexRepository {
     }
 
     async fn find_conflicts_by_share(&self, share_id: &ShareId) -> Result<Vec<SyncConflict>, DomainError> {
-        let conn=self.conn.clone();
+        let pool=self.pool.clone();
         let share_id=share_id.clone();
         
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(db_err)?;
+            let conn = pool.get().map_err(db_err)?;
             let mut stmt = conn.prepare("SELECT * FROM sync_conflicts WHERE share_id = ?1")
                 .map_err(db_err)?;
             
@@ -297,10 +303,10 @@ impl FileIndexRepository for SqliteFileIndexRepository {
     }
 
     async fn delete_conflict(&self, conflict_id: &str) -> Result<(), DomainError> {
-        let conn=self.conn.clone(); 
+        let pool=self.pool.clone(); 
         let conflict_id=conflict_id.to_string();
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(db_err)?;
+            let conn = pool.get().map_err(db_err)?;
             conn.execute("DELETE FROM sync_conflicts WHERE conflict_id = ?1", params![conflict_id])
                 .map_err(db_err)?;
             Ok(())
@@ -310,9 +316,9 @@ impl FileIndexRepository for SqliteFileIndexRepository {
 
 impl SqliteFileIndexRepository {
     pub async fn cleanup_expired_tombstones(&self, before_timestamp: i64) -> Result<usize, DomainError> {
-        let conn=self.conn.clone();
+        let pool=self.pool.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(db_err)?;
+            let conn = pool.get().map_err(db_err)?;
             let mut stmt = conn.prepare("DELETE FROM file_index WHERE status = 'tombstone' AND last_modified < ?1").map_err(db_err)?;
             
             stmt.execute([&before_timestamp]).map_err(db_err)

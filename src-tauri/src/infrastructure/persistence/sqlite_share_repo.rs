@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use rusqlite::{Connection, Result as SqlResult, OptionalExtension};
-use std::sync::{Arc, Mutex};
 
 use crate::domain::model::device::DeviceId;
 use crate::domain::model::share::{
@@ -8,18 +7,19 @@ use crate::domain::model::share::{
 };
 use crate::domain::port::share_repo::ShareRepository;
 use crate::domain::error::DomainError;
+use super::Dbpool;
 
 fn db_err(e: impl std::fmt::Display) -> DomainError {
     DomainError::Persistence(e.to_string())
 }   
 
 pub struct SqliteShareRepository {
-    conn: Arc<Mutex<Connection>>,
+    pool: Dbpool,
 }
 
 impl SqliteShareRepository {
-    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
-        Self { conn }
+    pub fn new(pool: Dbpool,) -> Self {
+        Self { pool }
     }
 
     fn serialize_sync_mode(mode: &SyncMode) -> &'static str {
@@ -128,11 +128,11 @@ impl SqliteShareRepository {
 #[async_trait]
 impl ShareRepository for SqliteShareRepository {
     async fn save(&self, share: &Share) -> Result<(), DomainError> {
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
         let share = share.clone();
 
         tokio::task::spawn_blocking(move || {
-            let mut conn = conn.lock().map_err(db_err)?;
+            let mut conn = pool.get().map_err(db_err)?;
             let tx = conn.transaction().map_err(db_err)?;
 
             // 1. Insert or Replace the Share
@@ -181,11 +181,11 @@ impl ShareRepository for SqliteShareRepository {
     }
 
     async fn find_by_id(&self, id: &ShareId) -> Result<Option<Share>, DomainError> {
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
         let id = id.clone();
 
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(db_err)?;
+            let conn = pool.get().map_err(db_err)?;
 
             let mut stmt = conn.prepare(
                 "SELECT share_id, share_name, local_path, sync_mode, status, created_by, created_at 
@@ -216,11 +216,11 @@ impl ShareRepository for SqliteShareRepository {
     }
 
     async fn find_by_member(&self, device_id: &DeviceId) -> Result<Vec<Share>, DomainError> {
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
         let device_id = device_id.clone();
 
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(db_err)?;
+            let conn = pool.get().map_err(db_err)?;
 
             let mut stmt = conn.prepare(
                 "SELECT share_id, share_name, local_path, sync_mode, status, created_by, created_at 
@@ -254,10 +254,10 @@ impl ShareRepository for SqliteShareRepository {
     }
 
     async fn find_all(&self) -> Result<Vec<Share>, DomainError> {
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
 
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(db_err)?;
+            let conn = pool.get().map_err(db_err)?;
 
             let mut stmt = conn.prepare(
                 "SELECT share_id, share_name, local_path, sync_mode, status, created_by, created_at 

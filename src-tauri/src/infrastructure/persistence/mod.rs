@@ -4,11 +4,16 @@ pub mod sqlite_audit_repo;
 pub mod sqlite_share_repo;
 pub mod sqlite_file_index_repo;
 
-use rusqlite::Connection;
-use std::sync::{Arc,Mutex};
+pub type Dbpool = r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>;
 
-pub fn init_database(db_path: &str) -> Result<Arc<Mutex<Connection>>, String> {
-    let conn = Connection::open(db_path).map_err(|e| format!("Failed to opening database: {}", e))?;
+pub fn init_database(db_path: &str) -> Result<Dbpool, String> {
+    let manager = r2d2_sqlite::SqliteConnectionManager::file(db_path);
+    let pool =r2d2::Pool::builder()
+        .max_size(8)
+        .build(manager)
+        .map_err(|e| format!("Failed to create connection pool: {}", e))?;
+
+    let conn = pool.get().map_err(|e| format!("Failed to get connection: {}", e))?;
 
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
@@ -130,5 +135,5 @@ pub fn init_database(db_path: &str) -> Result<Arc<Mutex<Connection>>, String> {
         [],
     ).map_err(|e| format!("Failed to create tombstone index: {}", e))?;
 
-    Ok(Arc::new(Mutex::new(conn)))
+    Ok(pool)
 }

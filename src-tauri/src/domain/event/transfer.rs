@@ -2,7 +2,7 @@ use crate::domain::port::event_bus::DomainEvent;
 use crate::domain::model::device::DeviceId;
 use crate::domain::model::transfer::{JobId, FileId, TransferError};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TransferRequested {
     pub job_id: JobId,
     pub peer: DeviceId,
@@ -14,7 +14,7 @@ impl DomainEvent for TransferRequested {
     fn aggregate_id(&self) -> &str { &self.job_id.0 }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TransferCompleted {
     pub job_id: JobId,
     pub total_bytes: u64,
@@ -25,7 +25,7 @@ impl DomainEvent for TransferCompleted {
     fn aggregate_id(&self) -> &str { &self.job_id.0 }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TransferFailed {
     pub job_id: JobId,
     pub error: TransferError,
@@ -36,7 +36,7 @@ impl DomainEvent for TransferFailed {
     fn aggregate_id(&self) -> &str { &self.job_id.0 }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ChunkVerificationFailed {
     pub job_id: JobId,
     pub file_id: FileId,

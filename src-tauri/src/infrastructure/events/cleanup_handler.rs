@@ -5,6 +5,7 @@ use crate::domain::port::transfer_repo::TransferRepository;
 use std::sync::Arc;
 use tokio::sync::broadcast::Receiver;
 
+const TRUST_REVOKED_EVENT: &str = "TrustRevoked";
 pub struct CascadeCleanupHandler {
     transfer_repo: Arc<dyn TransferRepository>,
     share_repo: Arc<dyn ShareRepository>,
@@ -19,7 +20,7 @@ impl CascadeCleanupHandler {
 
     pub async fn start(&self, mut rx: Receiver<Arc<dyn DomainEvent>>) {
         while let Ok(event) = rx.recv().await {
-            if event.event_type() == "TrustRevoked" {
+            if event.event_type() == TRUST_REVOKED_EVENT {
                 let device_id = DeviceId(event.aggregate_id().to_string());
                 self.handle_trust_revoked(&device_id).await;
             }
@@ -72,6 +73,7 @@ impl CascadeCleanupHandler {
         }
     } 
     
+    println!("[CascadeCleanup] Completed cleanup for revoked device {}",device_id.0);
     
 }
 

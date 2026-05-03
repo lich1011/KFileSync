@@ -50,7 +50,7 @@ impl DeviceAppService {
     }
 
     fn sweep_expired_sessions(&self) {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         let mut sessions = self.active_sessions.lock().unwrap();
         sessions.retain(|_, session| session.expires_at > now);
     }
@@ -83,7 +83,9 @@ impl DeviceAppService {
 
         // Clean up: abort the listener task to prevent resource leak
         listener_handle.abort();
-        let _ = self.discovery.stop().await;
+        if let Err(e) = self.discovery.stop().await{
+            eprintln!("[DeviceAppService] Failed to stop discovery: {}", e);
+        }
 
         // Fire DomainEvent for discovered devices
         for dev in &devices {
@@ -101,7 +103,9 @@ impl DeviceAppService {
                         address: dev.address.clone(),
                     }),
                 };
-                let _ = self.repo.save(new_dev).await;
+                if let Err(e) = self.repo.save(new_dev).await{
+                    eprintln!("[DeviceAppService] Failed to persist discovered device: {}", e);
+                }
             }
         }
         
@@ -120,8 +124,13 @@ impl DeviceAppService {
         };
 
         // Create pairing session
-        let pin = format!("{:06}", rand::random::<u32>() % 1000000);
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let pin = {
+            use rand::Rng;
+
+            let mut rng = rand::rngs::OsRng;
+            format!("{:06}", rng.gen_range(0..1_000_000u32))
+        };
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         let expires_at = timestamp + 300;
         let session = PairingSession::new(target.clone(), pin.clone(), expires_at);
         
@@ -152,7 +161,7 @@ impl DeviceAppService {
         pin_code: &str,
         cert_pem: String,
     ) -> Result<(), DomainError> {
-        let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
        
         let verify_result = {
             let mut sessions = self.active_sessions.lock().unwrap();
@@ -175,7 +184,7 @@ impl DeviceAppService {
             .ok_or_else(|| DomainError::DeviceNotFound(target_device_id.0.clone()))?;
 
         let cert = Certificate::from_pem(cert_pem)?;
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         let updated_state = device.state.confirm_pairing(cert, timestamp)?;
 
         let updated_device = Device {
@@ -198,7 +207,7 @@ impl DeviceAppService {
         let device = self.repo.find_by_id(device_id.clone()).await?
             .ok_or_else(|| DomainError::DeviceNotFound(device_id.0.clone()))?;
 
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         let updated_state = device.state.revoke(timestamp)?;
 
         let updated_device = Device {
