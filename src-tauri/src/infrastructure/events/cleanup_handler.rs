@@ -71,9 +71,8 @@ impl CascadeCleanupHandler {
                 eprintln!("[CascadeCleanup] Failed to query shares for {}: {}", device_id.0, e);
             }
         }
+        println!("[CascadeCleanup] Completed cleanup for revoked device {}",device_id.0)
     } 
-    
-    println!("[CascadeCleanup] Completed cleanup for revoked device {}",device_id.0);
     
 }
 

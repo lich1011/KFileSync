@@ -60,14 +60,14 @@ impl TransferAppService {
                         item.chunk_manifest.chunks = hashed_chunks;
                     }
                     Ok(Err(e)) => {
-                        return Err(DomainError::IntegrityError((
+                        return Err(DomainError::IntegrityError(
                             format!("Hash computation failed for {}: {}", item.file_path, e)
-                        )));
+                        ));
                     }
                     Err(e) => {
-                       return Err(DomainError::IntegrityError((
+                       return Err(DomainError::IntegrityError(
                             format!("Hash computation spawn error: {}", e)
-                        )));
+                        ));
                     }
                 }
             }
