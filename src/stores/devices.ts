@@ -52,7 +52,7 @@ export const useDeviceStore = defineStore('devices', () => {
       await api.rejectPairing(pairingDeviceId.value)
       useNotificationStore().add('info',"已拒绝配对")
     }catch(e){
-      useNotificationStore().add('error',"已拒绝配对")
+      useNotificationStore().add('error',"拒绝配对失败")
     }finally{
       pairingDeviceId.value = null
       pairingPin.value =null
