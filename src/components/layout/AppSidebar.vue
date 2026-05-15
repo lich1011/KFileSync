@@ -7,6 +7,7 @@ const navItems = [
   { path: '/devices', label: '设备', icon: '📱' },
   { path: '/transfers', label: '传输', icon: '📁' },
   { path: '/shares', label: '共享', icon: '🔗' },
+  { path: '/sync', label: '同步', icon: '' },
 ]
 </script>
 

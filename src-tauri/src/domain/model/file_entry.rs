@@ -162,6 +162,7 @@ pub enum ConflictResolution {
 
 #[derive(Clone, Debug)]
 pub struct SyncConflict {
+    pub conflict_id: String,
     pub path: String,
     pub local: FileEntry,
     pub remote: FileEntry,

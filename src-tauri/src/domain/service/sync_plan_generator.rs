@@ -93,6 +93,7 @@ impl SyncPlanGenerator {
                         // Conflict!
                         let resolution = ConflictResolver::resolve(local, remote);
                         plan.conflicts.push(SyncConflict {
+                            conflict_id: uuid::Uuid::new_v4().to_string(),
                             path: path.to_string(),
                             local: (*local).clone(),
                             remote: (*remote).clone(),

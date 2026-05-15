@@ -38,6 +38,28 @@ export interface ShareInfo {
   members: ShareMember[]
 }
 
+export interface PairedDevice{
+  id: string
+  alias: string
+  address: string
+  pairedAt: number
+  lastSeenAt: number | null
+  online: boolean
+}
+
+export interface SyncStatus{
+  sharedId: string
+  totalFiles: number
+  conflicts: number
+}
+
+export interface SyncConflict{
+  conflictId: string
+  shareId: string
+  filePath: string
+  resolution: string
+}
+
 export type NotificationType = 'success' | 'error' | 'warning' | 'info'
 
 export interface Notification {

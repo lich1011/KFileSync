@@ -1,12 +1,33 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useDeviceStore } from '../stores/devices'
+import { addManualDevice } from '../api/tauri'
+import { useNotificationStore } from '../stores/notifications'
 
 const store = useDeviceStore()
+const manualIp = ref('')
+const addingManual = ref(false)
 
 onMounted(() => {
   store.fetchDevices()
 })
+
+async function onAddManualIp() {
+  if (!manualIp.value.trim()) return
+  addingManual.value = true
+  try {
+    const device = await addManualDevice(manualIp.value.trim())
+    if (!store.devices.find(existing => existing.id === device.id)) {
+      store.devices.push(device)
+    }
+    manualIp.value = ''
+    useNotificationStore().add('success', `Found: ${device.alias}`)
+  } catch (e: any) {
+    useNotificationStore().add('error', `Failed: ${e}`)
+  } finally {
+    addingManual.value = false
+  }
+}
 </script>
 
 <template>
@@ -19,6 +40,17 @@ onMounted(() => {
         :disabled="store.loading"
       >
         {{ store.loading ? '扫描中...' : '刷新' }}
+      </button>
+    </div>
+
+    <div class="manual-ip">
+      <input
+        v-model="manualIp"
+        placeholder="IP address (e.g. 192.168.1.100)"
+        @keyup.enter="onAddManualIp()"
+      />
+      <button class="primary" :disabled="addingManual" @click="onAddManualIp()">
+        {{ addingManual ? '...' : 'Add' }}
       </button>
     </div>
 
@@ -37,14 +69,14 @@ onMounted(() => {
           <div class="device-meta">
             {{ device.address }}
             <span class="device-status" :class="device.status.toLowerCase()">
-              {{ device.status }}
+              : {{ device.status }}
             </span>
           </div>
         </div>
-        
+
         <button 
-          v-if="device.status === 'Discovered'" 
-          class="primary" 
+          v-if="device.status === 'Discovered'"
+          class="primary"
           @click="store.requestPairing(device.id)"
         >
           配对
@@ -128,5 +160,26 @@ ul {
 .badge--success {
   background: rgba(46, 204, 113, 0.15);
   color: var(--success);
+}
+
+.manual-ip {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.manual-ip input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.manual-ip input:focus {
+  outline: none;
+  border-color: var(--accent);
 }
 </style>

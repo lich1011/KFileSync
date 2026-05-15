@@ -17,6 +17,7 @@ const store = useDeviceStore()
       :pin="store.pairingPin ?? ''"
       @close="store.closePairingDialog()"
       @confirm="(pin, cert) => store.confirmPairing(pin, cert)"
+      @reject="store.rejectPairing()"
     />
   </div>
 </template>

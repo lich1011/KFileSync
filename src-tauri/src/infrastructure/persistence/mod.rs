@@ -1,25 +1,27 @@
 pub mod sqlite_device_repo;
-pub mod sqlite_transfer_repo;
-pub mod sqlite_audit_repo;
-pub mod sqlite_share_repo;
 pub mod sqlite_file_index_repo;
+pub mod sqlite_share_repo;
+pub mod sqlite_transfer_repo;
 
 pub type Dbpool = r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>;
 
 pub fn init_database(db_path: &str) -> Result<Dbpool, String> {
     let manager = r2d2_sqlite::SqliteConnectionManager::file(db_path);
-    let pool =r2d2::Pool::builder()
+    let pool = r2d2::Pool::builder()
         .max_size(8)
         .build(manager)
         .map_err(|e| format!("Failed to create connection pool: {}", e))?;
 
-    let conn = pool.get().map_err(|e| format!("Failed to get connection: {}", e))?;
+    let conn = pool
+        .get()
+        .map_err(|e| format!("Failed to get connection: {}", e))?;
 
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
         PRAGMA synchronous = NORMAL;
-        PRAGMA foreign_keys = ON;"
-    ).map_err(|e| format!("Failed to set pragmas: {}", e))?;
+        PRAGMA foreign_keys = ON;",
+    )
+    .map_err(|e| format!("Failed to set pragmas: {}", e))?;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS devices (
@@ -27,7 +29,8 @@ pub fn init_database(db_path: &str) -> Result<Dbpool, String> {
             state_json TEXT NOT NULL
         )",
         [],
-    ).map_err(|e| format!("Failed to create devices table: {}", e))?;
+    )
+    .map_err(|e| format!("Failed to create devices table: {}", e))?;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS audit_logs (
@@ -38,7 +41,8 @@ pub fn init_database(db_path: &str) -> Result<Dbpool, String> {
             details TEXT NOT NULL
         )",
         [],
-    ).map_err(|e| format!("Failed to create audit_logs table: {}", e))?;
+    )
+    .map_err(|e| format!("Failed to create audit_logs table: {}", e))?;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS transfer_jobs (
@@ -52,7 +56,8 @@ pub fn init_database(db_path: &str) -> Result<Dbpool, String> {
             created_at      INTEGER NOT NULL
         )",
         [],
-    ).map_err(|e| format!("Failed to create transfer_jobs table: {}", e))?;
+    )
+    .map_err(|e| format!("Failed to create transfer_jobs table: {}", e))?;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS transfer_items (
@@ -63,12 +68,14 @@ pub fn init_database(db_path: &str) -> Result<Dbpool, String> {
             FOREIGN KEY (job_id) REFERENCES transfer_jobs(job_id) ON DELETE CASCADE
         )",
         [],
-    ).map_err(|e| format!("Failed to create transfer_items table: {}", e))?;
+    )
+    .map_err(|e| format!("Failed to create transfer_items table: {}", e))?;
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_transfer_jobs_status ON transfer_jobs(status)",
         [],
-    ).map_err(|e| format!("Failed to create transfer_jobs index: {}", e))?;
+    )
+    .map_err(|e| format!("Failed to create transfer_jobs index: {}", e))?;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS shares (
@@ -81,7 +88,8 @@ pub fn init_database(db_path: &str) -> Result<Dbpool, String> {
             created_at  INTEGER NOT NULL
         )",
         [],
-    ).map_err(|e| format!("Failed to create shares table: {}", e))?;
+    )
+    .map_err(|e| format!("Failed to create shares table: {}", e))?;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS share_members (
@@ -94,7 +102,8 @@ pub fn init_database(db_path: &str) -> Result<Dbpool, String> {
             FOREIGN KEY (share_id) REFERENCES shares(share_id) ON DELETE CASCADE
         )",
         [],
-    ).map_err(|e| format!("Failed to create share_members table: {}", e))?;
+    )
+    .map_err(|e| format!("Failed to create share_members table: {}", e))?;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS file_entries (
@@ -113,7 +122,8 @@ pub fn init_database(db_path: &str) -> Result<Dbpool, String> {
             PRIMARY KEY (share_id, path)
         )",
         [],
-    ).map_err(|e| format!("Failed to create file_entries table: {}", e))?;
+    )
+    .map_err(|e| format!("Failed to create file_entries table: {}", e))?;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS sync_conflicts (
@@ -127,13 +137,39 @@ pub fn init_database(db_path: &str) -> Result<Dbpool, String> {
             resolved_at   INTEGER
         )",
         [],
-    ).map_err(|e| format!("Failed to create sync_conflicts table: {}", e))?;
+    )
+    .map_err(|e| format!("Failed to create sync_conflicts table: {}", e))?;
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_file_entries_tombstone \
          ON file_entries(deleted, deleted_at) WHERE deleted = 1",
         [],
-    ).map_err(|e| format!("Failed to create tombstone index: {}", e))?;
+    )
+    .map_err(|e| format!("Failed to create tombstone index: {}", e))?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS pairing_requests (
+            id   TEXT PRIMARY KEY,
+            device_id      TEXT NOT NULL,
+            alias     TEXT,
+            pin_code   TEXT NOT NULL,
+            status  TEXT NOT NULL DEFAULT 'pending',
+            created_at    INTEGER NOT NULL,
+            espires_at    INTEGER NOT NULL,
+            attempts   INTEGER NOT NULL DEFAULT 0
+        )",
+        [],
+    )
+    .map_err(|e| format!("Failed to create pairing_requests table: {}", e))?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )",
+        [],
+    )
+    .map_err(|e| format!("Failed to create tombstone index: {}", e))?;
 
     Ok(pool)
 }

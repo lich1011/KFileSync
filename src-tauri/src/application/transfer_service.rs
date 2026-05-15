@@ -1,9 +1,9 @@
-use std::fmt::format;
 use std::sync::Arc;
-use crate::domain::model::transfer::{TransferJob, TransferType, TransferError, FileRequest, JobId};
+use axum::handler;
+
+use crate::domain::model::transfer::{TransferJob, TransferType, TransferState, TransferError, FileRequest, JobId};
 use crate::domain::model::device::DeviceId;
 use crate::domain::error::DomainError;
-use crate::domain::service::chunking::ChunkingStrategy;
 use crate::domain::port::transfer_repo::TransferRepository;
 use crate::domain::port::repository::DeviceRepository;
 use crate::domain::port::event_bus::EventBus;
@@ -16,7 +16,6 @@ pub struct TransferAppService {
     transfer_repo: Arc<dyn TransferRepository>,
     device_repo: Arc<dyn DeviceRepository>,
     event_bus: Arc<dyn EventBus>,
-    chunking_strategy: Arc<dyn ChunkingStrategy>,
     network_client: Arc<dyn NetworkClient>,
 }
 
@@ -26,10 +25,9 @@ impl TransferAppService {
         transfer_repo: Arc<dyn TransferRepository>,
         device_repo: Arc<dyn DeviceRepository>,
         event_bus: Arc<dyn EventBus>,
-        chunking_strategy: Arc<dyn ChunkingStrategy>,
         network_client: Arc<dyn NetworkClient>,
     ) -> Self {
-        Self { local_device_id, transfer_repo, device_repo, event_bus, chunking_strategy, network_client }
+        Self { local_device_id, transfer_repo, device_repo, event_bus, network_client }
     }
 
     pub async fn send_files(&self, peer_device_id: DeviceId, files: Vec<FileRequest>) -> Result<JobId, DomainError> {
@@ -44,34 +42,40 @@ impl TransferAppService {
             TransferType::Send,
             peer_device_id.clone(),
             files,
-            self.chunking_strategy.as_ref()
+            // self.chunking_strategy.as_ref()
         );
 
-        for item in &mut job.items {
+        let mut hash_handles = Vec::new();
+
+        for (idx,item) in job.items.iter().enumerate() {
             let path = std::path::Path::new(&item.file_path);
             if path.exists() {
                 let cs = item.chunk_manifest.chunk_size;
-
-                match tokio::task::spawn_blocking({
-                    let p = path.to_path_buf();
-                    move ||ChunkHasher::hash_file_chunks(&p, cs)
-                }).await {
-                    Ok(Ok(hashed_chunks)) => {
-                        item.chunk_manifest.chunks = hashed_chunks;
-                    }
-                    Ok(Err(e)) => {
-                        return Err(DomainError::IntegrityError(
-                            format!("Hash computation failed for {}: {}", item.file_path, e)
-                        ));
-                    }
-                    Err(e) => {
-                       return Err(DomainError::IntegrityError(
-                            format!("Hash computation spawn error: {}", e)
-                        ));
-                    }
-                }
+                let p = path.to_path_buf();
+                let handle = tokio::task::spawn_blocking(move ||{
+                    ChunkHasher::hash_file_chunks(&p, cs)
+                });
+                hash_handles.push((idx,handle));
             }
             
+        }
+
+        for(idx, handle) in hash_handles{
+            match handle.await {
+                Ok(Ok(hashed_chunks)) =>{
+                    job.items[idx].chunk_manifest.chunks = hashed_chunks;
+                }
+                Ok(Err(e)) =>{
+                    return Err(DomainError::IntegrityError(
+                        format!("Hash computation failed for {}: {}",job.items[idx].file_path,e)
+                    ));
+                }
+                Err(e)=>{
+                    return Err(DomainError::IntegrityError(
+                        format!("Hash computation spawn error: {}",e)
+                    ));
+                }
+            }
         }
 
         // A5 FIX: 先提取需要的字段，再把 job 移进 save()
@@ -174,6 +178,12 @@ impl TransferAppService {
                     ChunkHasher::compute_sha256(std::path::Path::new(&path))
                 }).await
                 .map_err(|e| DomainError::FileSystem(e.to_string()))??;
+                
+                if actual!= expected{
+                    return Err(DomainError::IntegrityError(
+                        format!("File hash mismath for {}: expected {}, got {}",item.file_path,expected,actual)
+                    ));
+                }
             }
         }
 
@@ -226,5 +236,42 @@ impl TransferAppService {
         self.transfer_repo.save(job).await?;
         
         Ok(())
+    }
+
+    pub async fn retry_failed_transfers(&self) {
+        const MAX_RETRIES: u32 = 5;
+        const BASE_DELAY_MS: u64 = 1000;
+
+        let jobs = match self.transfer_repo.find_incomplete_jobs().await {
+            Ok(jobs) => jobs,
+            Err(_) => return,
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        for mut job in jobs {
+            if let TransferState::Failed { retries, .. } = &job.state {
+                if *retries >= MAX_RETRIES {
+                    continue;
+                }
+
+                let delay_secs = BASE_DELAY_MS * 2u64.pow(*retries) / 1000;
+                let elapsed = now.saturating_sub(job.created_at);
+                if elapsed < delay_secs {
+                    continue;
+                }
+
+                let job_id = job.job_id.clone();
+                job.state = TransferState::Active { started_at: now };
+                if let Err(e) = self.transfer_repo.save(job).await {
+                    eprintln!("[RetryScheduler] Failed to save retried job {}: {}", job_id.0, e);
+                } else {
+                    println!("[RetryScheduler] Retrying job {} (attempt)", job_id.0);
+                }
+            }
+        }
     }
 }

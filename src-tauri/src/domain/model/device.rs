@@ -44,6 +44,8 @@ pub struct PairedData {
     pub paired_at: u64,
     pub alias: String,
     pub address: String,
+    #[serde(default)]
+    pub last_seen_at: Option<u64>
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,6 +71,7 @@ impl DeviceState {
                 paired_at: timestamp,
                 alias: data.alias,
                 address: data.address,
+                last_seen_at:None
             })),
             _ => Err(DomainError::InvalidStateTransition("only Discovered can be paired")),
         }

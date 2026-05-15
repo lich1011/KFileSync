@@ -4,7 +4,7 @@ use crate::domain::error::DomainError;
 use crate::domain::model::device::DeviceId;
 use crate::domain::model::file_entry::{BlockList, ConflictResolution, EntryType, FileEntry, SyncConflict, VersionVector};
 use crate::domain::model::share::ShareId;
-use crate::domain::port::file_index_repo::{FileIndexRepository, LocalBlockCopy};
+use crate::domain::port::file_index_repo::FileIndexRepository;
 use super::Dbpool;
 
 fn db_err(e: impl std::fmt::Display) -> DomainError {
@@ -195,51 +195,52 @@ impl FileIndexRepository for SqliteFileIndexRepository {
         }).await.map_err(db_err)?
     }
 
-    async fn find_blocks_by_hash(&self, share_id: &ShareId, hash: &str) -> Result<Vec<LocalBlockCopy>, DomainError> {
-        let pool = self.pool.clone();
-        let share_id = share_id.clone();
-        let hash = hash.to_string();
+    // async fn find_blocks_by_hash(&self, share_id: &ShareId, hash: &str) -> Result<Vec<LocalBlockCopy>, DomainError> {
+    //     let pool = self.pool.clone();
+    //     let share_id = share_id.clone();
+    //     let hash = hash.to_string();
 
-        tokio::task::spawn_blocking(move || {
-            let conn = pool.get().map_err(db_err)?;
+    //     tokio::task::spawn_blocking(move || {
+    //         let conn = pool.get().map_err(db_err)?;
             
-        // This is a slow operation in SQLite unless we create a virtual table or extract blocks into a separate table.
-        // For MVP, since `blocks` is stored as JSON, doing a LIKE query is a hack but works for deduplication fallback.
-        // A better approach would be normalizing `blocks` into a `file_blocks` table, but we will follow the provided schema.
+    //     // This is a slow operation in SQLite unless we create a virtual table or extract blocks into a separate table.
+    //     // For MVP, since `blocks` is stored as JSON, doing a LIKE query is a hack but works for deduplication fallback.
+    //     // A better approach would be normalizing `blocks` into a `file_blocks` table, but we will follow the provided schema.
         
-            let like_query = format!("%\"hash\":\"{}\"%", hash);
-            let mut stmt = conn.prepare("SELECT path, blocks FROM file_entries WHERE share_id = ?1 AND blocks LIKE ?2 AND deleted = 0")
-                .map_err(db_err)?;
+    //         let like_query = format!("%\"hash\":\"{}\"%", hash);
+    //         let mut stmt = conn.prepare("SELECT path, blocks FROM file_entries WHERE share_id = ?1 AND blocks LIKE ?2 AND deleted = 0")
+    //             .map_err(db_err)?;
 
-            let mut rows = stmt.query(params![share_id.0, like_query])
-                .map_err(db_err)?;
+    //         let mut rows = stmt.query(params![share_id.0, like_query])
+    //             .map_err(db_err)?;
 
-            let mut copies = Vec::new();
-            while let Some(row) = rows.next().map_err(db_err)? {
-                let path: String = row.get(0).unwrap_or_default();
-                let blocks_str: String = row.get(1).unwrap_or_default();
+    //         let mut copies = Vec::new();
+    //         while let Some(row) = rows.next().map_err(db_err)? {
+    //             let path: String = row.get(0).unwrap_or_default();
+    //             let blocks_str: String = row.get(1).unwrap_or_default();
                 
-                if let Ok(block_list) = serde_json::from_str::<BlockList>(&blocks_str) {
-                    let mut current_offset: u64 = 0;
-                    for b in block_list.0 {
-                        if b.hash == hash {
-                            copies.push(LocalBlockCopy {
-                                hash: hash.to_string(),
-                                source_path: path.clone(),
-                                source_offset: current_offset,
-                            });
-                        }
-                        current_offset += b.size as u64;
-                    }
-                }
-            }
+    //             if let Ok(block_list) = serde_json::from_str::<BlockList>(&blocks_str) {
+    //                 let mut current_offset: u64 = 0;
+    //                 for b in block_list.0 {
+    //                     if b.hash == hash {
+    //                         copies.push(LocalBlockCopy {
+    //                             hash: hash.to_string(),
+    //                             source_path: path.clone(),
+    //                             source_offset: current_offset,
+    //                         });
+    //                     }
+    //                     current_offset += b.size as u64;
+    //                 }
+    //             }
+    //         }
 
-            Ok(copies)
-        }).await.map_err(db_err)?
-    }
+    //         Ok(copies)
+    //     }).await.map_err(db_err)?
+    // }
 
     async fn save_conflict(&self, conflict: &SyncConflict) -> Result<(), DomainError> {
         let pool = self.pool.clone();
+        let conflict_id= conflict.conflict_id.clone();
         let conflict_path = conflict.path.clone();
         let local_json = serde_json::to_string(&conflict.local).map_err(db_err)?;
         let remote_json = serde_json::to_string(&conflict.remote).map_err(db_err)?;
@@ -251,7 +252,7 @@ impl FileIndexRepository for SqliteFileIndexRepository {
             let conflict_id = uuid::Uuid::new_v4().to_string();
 
             conn.execute(
-                "INSERT INTO sync_conflicts (
+                "INSERT OR REPLACE INTO sync_conflicts (
                     conflict_id, share_id, file_path, local_entry, remote_entry, resolution
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
@@ -291,6 +292,7 @@ impl FileIndexRepository for SqliteFileIndexRepository {
                 let resolution = Self::deserialize_resolution(&resolution_str);
 
                 conflicts.push(SyncConflict {
+                    conflict_id:row.get("conflict_id").unwrap_or_default(),
                     path: row.get("file_path").unwrap_or_default(),
                     local,
                     remote,
@@ -319,7 +321,7 @@ impl SqliteFileIndexRepository {
         let pool=self.pool.clone();
         tokio::task::spawn_blocking(move || {
             let conn = pool.get().map_err(db_err)?;
-            let mut stmt = conn.prepare("DELETE FROM file_index WHERE status = 'tombstone' AND last_modified < ?1").map_err(db_err)?;
+            let mut stmt = conn.prepare("DELETE FROM file_entries WHERE deleted = 1 AND deleted_at < ?1").map_err(db_err)?;
             
             stmt.execute([&before_timestamp]).map_err(db_err)
         }).await.map_err(db_err)?

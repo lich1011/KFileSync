@@ -46,6 +46,19 @@ export const useDeviceStore = defineStore('devices', () => {
     }
   }
 
+  async function rejectPairing() {
+    if(!pairingDeviceId.value) return
+    try{
+      await api.rejectPairing(pairingDeviceId.value)
+      useNotificationStore().add('info',"已拒绝配对")
+    }catch(e){
+      useNotificationStore().add('error',"已拒绝配对")
+    }finally{
+      pairingDeviceId.value = null
+      pairingPin.value =null
+    }
+  } 
+
   function closePairingDialog() {
     pairingDeviceId.value = null
     pairingPin.value = null
@@ -59,6 +72,7 @@ export const useDeviceStore = defineStore('devices', () => {
     fetchDevices, 
     requestPairing, 
     confirmPairing, 
+    rejectPairing,
     closePairingDialog 
   }
 })

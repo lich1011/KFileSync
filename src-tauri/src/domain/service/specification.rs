@@ -1,102 +1,102 @@
 use std::path::Path;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use crate::domain::model::device::{Device, DeviceState};
-use crate::domain::model::share::{Share, SyncMode};
+// use crate::domain::model::device::{Device, DeviceState};
+// use crate::domain::model::share::{Share, SyncMode};
 
-pub trait Specification<T> {
-    fn is_satisfied_by(&self, candidate: &T) -> bool;
-}
+// pub trait Specification<T> {
+//     fn is_satisfied_by(&self, candidate: &T) -> bool;
+// }
 
-pub struct AndSpec<A, B>(pub A, pub B);
+// pub struct AndSpec<A, B>(pub A, pub B);
 
-impl<T, A, B> Specification<T> for AndSpec<A, B>
-where
-    A: Specification<T>,
-    B: Specification<T>,
-{
-    fn is_satisfied_by(&self, candidate: &T) -> bool {
-        self.0.is_satisfied_by(candidate) && self.1.is_satisfied_by(candidate)
-    }
-}
+// impl<T, A, B> Specification<T> for AndSpec<A, B>
+// where
+//     A: Specification<T>,
+//     B: Specification<T>,
+// {
+//     fn is_satisfied_by(&self, candidate: &T) -> bool {
+//         self.0.is_satisfied_by(candidate) && self.1.is_satisfied_by(candidate)
+//     }
+// }
 
-// ---------------------------------------------------------
-// Unified Context for Sync Authorization
-// ---------------------------------------------------------
+// // ---------------------------------------------------------
+// // Unified Context for Sync Authorization
+// // ---------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SyncDirection {
-    Push,
-    Pull,
-}
+// #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// pub enum SyncDirection {
+//     Push,
+//     Pull,
+// }
 
-pub struct SyncContext<'a> {
-    pub device: &'a Device,
-    pub share: &'a Share,
-    pub action: SyncDirection,
-}
+// pub struct SyncContext<'a> {
+//     pub device: &'a Device,
+//     pub share: &'a Share,
+//     pub action: SyncDirection,
+// }
 
-// ---------------------------------------------------------
-// Device Trust Specification
-// ---------------------------------------------------------
+// // ---------------------------------------------------------
+// // Device Trust Specification
+// // ---------------------------------------------------------
 
-pub struct TrustedDeviceSpec;
+// pub struct TrustedDeviceSpec;
 
-impl<'a> Specification<SyncContext<'a>> for TrustedDeviceSpec {
-    fn is_satisfied_by(&self, candidate: &SyncContext<'a>) -> bool {
-        matches!(candidate.device.state, DeviceState::Paired(_))
-    }
-}
+// impl<'a> Specification<SyncContext<'a>> for TrustedDeviceSpec {
+//     fn is_satisfied_by(&self, candidate: &SyncContext<'a>) -> bool {
+//         matches!(candidate.device.state, DeviceState::Paired(_))
+//     }
+// }
 
-// ---------------------------------------------------------
-// Share Member Specification
-// ---------------------------------------------------------
+// // ---------------------------------------------------------
+// // Share Member Specification
+// // ---------------------------------------------------------
 
-pub struct ShareMemberSpec;
+// pub struct ShareMemberSpec;
 
-impl<'a> Specification<SyncContext<'a>> for ShareMemberSpec {
-    fn is_satisfied_by(&self, candidate: &SyncContext<'a>) -> bool {
-        candidate.share.has_member(&candidate.device.id)
-    }
-}
+// impl<'a> Specification<SyncContext<'a>> for ShareMemberSpec {
+//     fn is_satisfied_by(&self, candidate: &SyncContext<'a>) -> bool {
+//         candidate.share.has_member(&candidate.device.id)
+//     }
+// }
 
-// ---------------------------------------------------------
-// Permission Specification
-// ---------------------------------------------------------
+// // ---------------------------------------------------------
+// // Permission Specification
+// // ---------------------------------------------------------
 
-pub struct PermissionSpec;
+// pub struct PermissionSpec;
 
-impl<'a> Specification<SyncContext<'a>> for PermissionSpec {
-    fn is_satisfied_by(&self, candidate: &SyncContext<'a>) -> bool {
-        // 1. Check global Share sync_mode
-        match candidate.share.sync_mode {
-            SyncMode::TwoWay => {} // Normal
-            SyncMode::SendOnly => {
-                // Share is SendOnly (local device sends to peers).
-                // Peers are only allowed to Pull. They cannot Push to us.
-                if candidate.action == SyncDirection::Push {
-                    return false;
-                }
-            }
-            SyncMode::ReceiveOnly => {
-                // Share is ReceiveOnly (local device receives from peers).
-                // Peers are only allowed to Push. They cannot Pull from us.
-                if candidate.action == SyncDirection::Pull {
-                    return false;
-                }
-            }
-        }
+// impl<'a> Specification<SyncContext<'a>> for PermissionSpec {
+//     fn is_satisfied_by(&self, candidate: &SyncContext<'a>) -> bool {
+//         // 1. Check global Share sync_mode
+//         match candidate.share.sync_mode {
+//             SyncMode::TwoWay => {} // Normal
+//             SyncMode::SendOnly => {
+//                 // Share is SendOnly (local device sends to peers).
+//                 // Peers are only allowed to Pull. They cannot Push to us.
+//                 if candidate.action == SyncDirection::Push {
+//                     return false;
+//                 }
+//             }
+//             SyncMode::ReceiveOnly => {
+//                 // Share is ReceiveOnly (local device receives from peers).
+//                 // Peers are only allowed to Push. They cannot Pull from us.
+//                 if candidate.action == SyncDirection::Pull {
+//                     return false;
+//                 }
+//             }
+//         }
 
-        // 2. Check per-member permission
-        if let Some(perm) = candidate.share.get_permission(&candidate.device.id) {
-            match candidate.action {
-                SyncDirection::Push => perm.can_push(),
-                SyncDirection::Pull => perm.can_pull(),
-            }
-        } else {
-            false
-        }
-    }
-}
+//         // 2. Check per-member permission
+//         if let Some(perm) = candidate.share.get_permission(&candidate.device.id) {
+//             match candidate.action {
+//                 SyncDirection::Push => perm.can_push(),
+//                 SyncDirection::Pull => perm.can_pull(),
+//             }
+//         } else {
+//             false
+//         }
+//     }
+// }
 
 // ---------------------------------------------------------
 // Ignore Specification (.syncignore)
@@ -158,17 +158,21 @@ impl IgnoreSpec {
         let gitignore = builder.build()?;
         Ok(Self { gitignore })
     }
-}
 
-pub struct IgnoreContext<'a> {
-    pub path: &'a Path,
-    pub is_dir: bool,
-}
-
-impl<'a> Specification<IgnoreContext<'a>> for IgnoreSpec {
-    fn is_satisfied_by(&self, candidate: &IgnoreContext<'a>) -> bool {
-        // match_path returns Match::Ignore, Match::None, or Match::Whitelist
-        // We return true if it is matched by an ignore rule (i.e. should be ignored)
-        self.gitignore.matched_path_or_any_parents(candidate.path, candidate.is_dir).is_ignore()
+    pub fn is_ignored(&self, path: &Path, is_dir: bool) -> bool {
+        self.gitignore.matched_path_or_any_parents(path, is_dir).is_ignore()
     }
 }
+
+// pub struct IgnoreContext<'a> {
+//     pub path: &'a Path,
+//     pub is_dir: bool,
+// }
+
+// impl<'a> Specification<IgnoreContext<'a>> for IgnoreSpec {
+//     fn is_satisfied_by(&self, candidate: &IgnoreContext<'a>) -> bool {
+//         // match_path returns Match::Ignore, Match::None, or Match::Whitelist
+//         // We return true if it is matched by an ignore rule (i.e. should be ignored)
+//         self.gitignore.matched_path_or_any_parents(candidate.path, candidate.is_dir).is_ignore()
+//     }
+// }

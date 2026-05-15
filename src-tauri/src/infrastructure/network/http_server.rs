@@ -1,30 +1,33 @@
 use axum::{
-    routing::{get, post},
-    Router, Json, extract::{Query, State, Path as AxumPath, ConnectInfo},
     body::Bytes,
-    http::StatusCode,   
+    extract::{ConnectInfo, Path as AxumPath, Query, State},
+    http::StatusCode,
+    routing::{get, post},
+    Json, Router,
 };
+use axum_server::tls_rustls::RustlsConfig;
 use serde::Deserialize;
-use std::sync::Arc;
+use sha2::digest::Update;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tower_http::cors::CorsLayer;
-use axum_server::tls_rustls::RustlsConfig;
 
+use super::dto::{
+    PairRequestDto, PairResponseDto, ShareCancelDto, ShareInviteDto, SkipChunkDto,
+    SyncIndexResponseDto, TransferRequestDto, TransferResponseDto,
+};
 use crate::domain::model::device::{Device, DeviceId, DeviceState, DiscoveredData};
 use crate::domain::model::transfer::{
-    TransferJob, TransferType, TransferState, TransferItem,
-    ChunkManifest, ChunkInfo, FileId, JobId
-};  
-use crate::domain::port::repository::DeviceRepository;
+    ChunkInfo, ChunkManifest, FileId, JobId, TransferItem, TransferJob, TransferState, TransferType,
+};
 use crate::domain::port::file_index_repo::FileIndexRepository;
+use crate::domain::port::repository::DeviceRepository;
 use crate::domain::port::share_repo::ShareRepository;
 use crate::domain::port::transfer_repo::TransferRepository;
 use crate::infrastructure::security::chunk_hasher::ChunkHasher;
 use crate::infrastructure::security::keystore::fingerprint_short;
 use crate::infrastructure::security::nonce_validator::NonceValidator;
-use super::dto::{PairRequestDto, PairResponseDto, ShareInviteDto, SyncIndexResponseDto,
-    TransferRequestDto, TransferResponseDto, SkipChunkDto, ShareCancelDto};
 
 pub struct HttpServerConfig {
     pub port: u16,
@@ -64,18 +67,33 @@ pub async fn start_server(
     });
 
     let app = Router::new()
+        .route("/api/lansync/v1/info", get(handel_device_info))
         .route("/api/lansync/v1/pair/request", post(handle_pair_request))
+        .route("/api/lansync/v1/pair/reject", post(handel_pair_reject))
         .route("/api/lansync/v1/share/invite", post(handle_share_invite))
         .route("/api/lansync/v1/share/cancel", post(handle_share_cancel))
         .route("/api/lansync/v1/sync/index", get(handle_sync_index))
-        .route("/api/lansync/v1/transfer/request", post(handle_transfer_request))
-        .route("/api/lansync/v1/transfer/{job_id}/chunk/{file_id}/{chunk_index}", get(handle_chunk_download))
-        .route("/api/lansync/v1/transfer/{job_id}/chunk", post(handle_chunk_upload))
-        .layer(CorsLayer::new()
-            .allow_origin(tower_http::cors::Any)
-            .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
-            .allow_headers([axum::http::header::CONTENT_TYPE]))
-        .layer(tower_http::limit::RequestBodyLimitLayer::new(64 * 1024 * 1024))
+        .route(
+            "/api/lansync/v1/transfer/request",
+            post(handle_transfer_request),
+        )
+        .route(
+            "/api/lansync/v1/transfer/{job_id}/chunk/{file_id}/{chunk_index}",
+            get(handle_chunk_download),
+        )
+        .route(
+            "/api/lansync/v1/transfer/{job_id}/chunk",
+            post(handle_chunk_upload),
+        )
+        .layer(
+            CorsLayer::new()
+                .allow_origin(tower_http::cors::Any)
+                .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+                .allow_headers([axum::http::header::CONTENT_TYPE]),
+        )
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(
+            64 * 1024 * 1024,
+        ))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
@@ -98,6 +116,15 @@ pub async fn start_server(
     Ok(())
 }
 
+async fn handel_device_info(State(state): State<Arc<ServerAppState>>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "device_id":state.local_device_id.0,
+        "alias": state.local_alias,
+        "platform": std::env::consts::OS,
+        "version": env!("CARGO_PKG_VERSION")
+    }))
+}
+
 /// Handle incoming pair request from a remote device.
 /// Saves the requesting device as Discovered and responds with local device info.
 async fn handle_pair_request(
@@ -105,18 +132,20 @@ async fn handle_pair_request(
     State(state): State<Arc<ServerAppState>>,
     Json(req): Json<PairRequestDto>,
 ) -> Json<PairResponseDto> {
-    println!("[Server] Received pair request from {} (IP: {})", req.device_id, peer_addr.ip());
+    println!(
+        "[Server] Received pair request from {} (IP: {})",
+        req.device_id,
+        peer_addr.ip()
+    );
 
     if let Err(e) = state.nonce_validator.validate(&req.nonce, req.timestamp) {
-        return Json(
-            PairResponseDto { 
-                status: format!("rejected: {}", e), 
-                device_id: String::new(), 
-                alias: String::new(), 
-                platform: String::new(), 
-                fingerprint_short: String::new() 
-            }
-        );
+        return Json(PairResponseDto {
+            status: format!("rejected: {}", e),
+            device_id: String::new(),
+            alias: String::new(),
+            platform: String::new(),
+            fingerprint_short: String::new(),
+        });
     }
 
     // Save requesting device as Discovered (if not already known)
@@ -137,8 +166,34 @@ async fn handle_pair_request(
         device_id: state.local_device_id.0.clone(),
         alias: state.local_alias.clone(),
         platform: std::env::consts::OS.to_string(),
-        fingerprint_short: fingerprint_short(&state.local_device_id.0), 
+        fingerprint_short: fingerprint_short(&state.local_device_id.0),
     })
+}
+
+async fn handel_pair_reject(
+    State(state): State<Arc<ServerAppState>>,
+    Json(req): Json<PairRejectDto>,
+) -> Json<serde_json::Value> {
+    println!("[Service] Received pair reject from {}", req.device_id);
+
+    let peer_id = DeviceId(req.device_id);
+    match state.device_repo.find_by_id(peer_id.clone()).await{
+        Ok(Some(device)) =>{
+            if let Ok(revoked_state) = device.state.revoke(
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+            ){
+                let updated = Device {id: device.id, state: revoked_state};
+                let _ =state.device_repo.save(updated).await;
+            }
+        }
+        _ => {}
+    }
+
+     Json(serde_json::json!({"status":"ok"}))
+}
+#[derive(Deserialize)]
+struct PairRejectDto{
+    device_id:String
 }
 
 /// Handle incoming share invitation from a remote device.
@@ -146,7 +201,10 @@ async fn handle_share_invite(
     State(state): State<Arc<ServerAppState>>,
     Json(req): Json<ShareInviteDto>,
 ) -> Json<serde_json::Value> {
-    println!("[Server] Received share invite: {} from {}", req.share_name, req.invited_by);
+    println!(
+        "[Server] Received share invite: {} from {}",
+        req.share_name, req.invited_by
+    );
 
     if let Err(e) = state.nonce_validator.validate(&req.nonce, req.timestamp) {
         return Json(serde_json::json!({"status": "rejected", "reason": format!("{}", e)}));
@@ -155,21 +213,20 @@ async fn handle_share_invite(
     let sender_id = DeviceId(req.invited_by.clone());
     match state.device_repo.find_by_id(sender_id.clone()).await {
         Ok(Some(device)) => {
-            if !matches!(
-                device.state, 
-                DeviceState::Paired(_),
-            ) {
-                return Json(serde_json::json!({"status": "rejected", "reason": "Sender is not Paired"}));
-            }   
-        },
-        Ok(None)=> {
+            if !matches!(device.state, DeviceState::Paired(_),) {
+                return Json(
+                    serde_json::json!({"status": "rejected", "reason": "Sender is not Paired"}),
+                );
+            }
+        }
+        Ok(None) => {
             return Json(serde_json::json!({"status": "rejected", "reason": "Sender not found"}));
         }
         Err(e) => {
             return Json(serde_json::json!({"status": "error", "reason": format!("{}", e)}));
         }
     }
-    
+
     let permission = match req.permission.as_str() {
         "read_only" => crate::domain::model::share::SharePermission::ReadOnly,
         "send_only" => crate::domain::model::share::SharePermission::SendOnly,
@@ -178,24 +235,30 @@ async fn handle_share_invite(
     };
 
     let share_id = crate::domain::model::share::ShareId(req.share_id.clone());
-    
+
     match state.share_repo.find_by_id(&share_id).await {
         Ok(Some(existing)) => {
             if existing.has_member(&state.local_device_id) {
-                return Json(serde_json::json!({"status": "accepted", "reason": "Already a member"}));
+                return Json(
+                    serde_json::json!({"status": "accepted", "reason": "Already a member"}),
+                );
             }
             match existing.authorize_member(state.local_device_id.clone(), permission, sender_id) {
                 Ok(updated) => {
                     if let Err(e) = state.share_repo.save(&updated).await {
-                        return Json(serde_json::json!({"status": "error", "reason": format!("{}", e)}));
+                        return Json(
+                            serde_json::json!({"status": "error", "reason": format!("{}", e)}),
+                        );
                     }
                 }
                 Err(e) => {
-                    return Json(serde_json::json!({"status": "error", "reason": format!("{}", e)}));
+                    return Json(
+                        serde_json::json!({"status": "error", "reason": format!("{}", e)}),
+                    );
                 }
-            }   
-        },
-        Ok(None)=> {
+            }
+        }
+        Ok(None) => {
             let local_path = dirs::download_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
                 .join(&req.share_name)
@@ -203,26 +266,35 @@ async fn handle_share_invite(
                 .to_string();
 
             let share = crate::domain::model::share::Share::create(
-                share_id, req.share_name.clone(), 
-                local_path, crate::domain::model::share::SyncMode::TwoWay, sender_id.clone());
+                share_id,
+                req.share_name.clone(),
+                local_path,
+                crate::domain::model::share::SyncMode::TwoWay,
+                sender_id.clone(),
+            );
 
-            let share = match share.authorize_member(state.local_device_id.clone(), permission, sender_id) {
+            let share = match share.authorize_member(
+                state.local_device_id.clone(),
+                permission,
+                sender_id,
+            ) {
                 Ok(updated) => updated,
                 Err(e) => {
-                    return Json(serde_json::json!({"status": "error", "reason": format!("{}", e)}));
+                    return Json(
+                        serde_json::json!({"status": "error", "reason": format!("{}", e)}),
+                    );
                 }
             };
-            
+
             if let Err(e) = state.share_repo.save(&share).await {
                 return Json(serde_json::json!({"status": "error", "reason": format!("{}", e)}));
             }
-
         }
         Err(e) => {
             return Json(serde_json::json!({"status": "error", "reason": format!("{}", e)}));
         }
     }
-    
+
     // For MVP, auto-acknowledge. Real app would prompt the user.
     Json(serde_json::json!({"status": "accepted"}))
 }
@@ -231,7 +303,10 @@ async fn handle_share_cancel(
     State(state): State<Arc<ServerAppState>>,
     Json(req): Json<ShareCancelDto>,
 ) -> Json<serde_json::Value> {
-    println!("[Server] Received share cancel: share={} from device={}", req.share_id, req.device_id);
+    println!(
+        "[Server] Received share cancel: share={} from device={}",
+        req.share_id, req.device_id
+    );
 
     if let Err(e) = state.nonce_validator.validate(&req.nonce, req.timestamp) {
         return Json(serde_json::json!({"status": "rejected", "reason": format!("{}", e)}));
@@ -241,20 +316,22 @@ async fn handle_share_cancel(
     let device_id = DeviceId(req.device_id);
 
     match state.share_repo.find_by_id(&share_id).await {
-        Ok(Some(share)) => {
-            match share.remove_member(&device_id) {
-                Ok(updated) => {
-                    if let Err(e) = state.share_repo.save(&updated).await {
-                        return Json(serde_json::json!({"status": "error", "reason": format!("{}", e)}));
-                    }
-                }
-                Err(e) => {
-                    return Json(serde_json::json!({"status": "error", "reason": format!("{}", e)}));
+        Ok(Some(share)) => match share.remove_member(&device_id) {
+            Ok(updated) => {
+                if let Err(e) = state.share_repo.save(&updated).await {
+                    return Json(
+                        serde_json::json!({"status": "error", "reason": format!("{}", e)}),
+                    );
                 }
             }
-        }
+            Err(e) => {
+                return Json(serde_json::json!({"status": "error", "reason": format!("{}", e)}));
+            }
+        },
         Ok(None) => {
-            return Json(serde_json::json!({"status": "ok", "message": "Share not found, nothing to cancel"}));
+            return Json(
+                serde_json::json!({"status": "ok", "message": "Share not found, nothing to cancel"}),
+            );
         }
         Err(e) => {
             return Json(serde_json::json!({"status": "error", "reason": format!("{}", e)}));
@@ -263,7 +340,6 @@ async fn handle_share_cancel(
 
     Json(serde_json::json!({"status": "ok"}))
 }
-
 
 /// Serve local file index for a given share_id.
 #[derive(Deserialize)]
@@ -279,12 +355,13 @@ async fn handle_sync_index(
 ) -> Json<SyncIndexResponseDto> {
     let share_id = crate::domain::model::share::ShareId(query.share_id.clone());
 
-    let entries = state.file_index_repo.find_all_by_share(&share_id).await.unwrap_or_default();
+    let entries = state
+        .file_index_repo
+        .find_all_by_share(&share_id)
+        .await
+        .unwrap_or_default();
 
-    let index_version = entries.iter()
-        .map(|e| e.modified_at)
-        .max()
-        .unwrap_or(0);
+    let index_version = entries.iter().map(|e| e.modified_at).max().unwrap_or(0);
 
     Json(SyncIndexResponseDto {
         share_id: query.share_id,
@@ -296,51 +373,75 @@ async fn handle_sync_index(
 // ---- Transfer ----
 
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 
 async fn handle_transfer_request(
-    State(state): State<Arc<ServerAppState>>, 
-    Json(req): Json<TransferRequestDto>
+    State(state): State<Arc<ServerAppState>>,
+    Json(req): Json<TransferRequestDto>,
 ) -> Json<TransferResponseDto> {
-    println!("[Server] Transfer request from {} with {} files", req.sender_device_id, req.items.len());
-    
+    println!(
+        "[Server] Transfer request from {} with {} files",
+        req.sender_device_id,
+        req.items.len()
+    );
+
     if let Err(e) = state.nonce_validator.validate(&req.nonce, req.timestamp) {
         eprintln!("[Server] Transfer request nonce validation failed: {}", e);
-        return Json(TransferResponseDto { 
-            status: "rejected".to_string(), 
-            skip_chunks: vec![] 
+        return Json(TransferResponseDto {
+            status: "rejected".to_string(),
+            skip_chunks: vec![],
         });
     }
 
-    let items: Vec<TransferItem> = req.items.iter().map(|item| {
-        let mut chunks = Vec::new();
-        let cs = item.chunk_size;
-        
-        if cs == 0 {
-            chunks.push(ChunkInfo { index: 0, offset: 0, size: item.file_size as u32, hash: String::new() });
-        } else {
-            let mut offset = 0u64;
-            let mut idx = 0u32;
-            while offset < item.file_size {
-                let sz = std::cmp::min(cs as u64, item.file_size - offset) as u32;
-                chunks.push(ChunkInfo { index: idx, offset, size: sz, hash: String::new() });
-                offset += sz as u64;
-                idx += 1;
-            }
-        }
+    let items: Vec<TransferItem> = req
+        .items
+        .iter()
+        .map(|item| {
+            let mut chunks = Vec::new();
+            let cs = item.chunk_size;
 
-        TransferItem {
-            file_id: crate::domain::model::transfer::FileId(item.file_id.clone()),
-            file_path: item.file_path.clone(),
-            file_size: item.file_size,
-            sha256: item.sha256.clone(),
-            status: crate::domain::model::transfer::TransferItemStatus::Pending,
-            chunk_manifest: ChunkManifest { chunks, chunk_size: cs },
-            chunks_done: 0,
-            temp_path: None,
-        }
-    }).collect();
+            if cs == 0 {
+                chunks.push(ChunkInfo {
+                    index: 0,
+                    offset: 0,
+                    size: item.file_size as u32,
+                    hash: String::new(),
+                });
+            } else {
+                let mut offset = 0u64;
+                let mut idx = 0u32;
+                while offset < item.file_size {
+                    let sz = std::cmp::min(cs as u64, item.file_size - offset) as u32;
+                    chunks.push(ChunkInfo {
+                        index: idx,
+                        offset,
+                        size: sz,
+                        hash: String::new(),
+                    });
+                    offset += sz as u64;
+                    idx += 1;
+                }
+            }
+
+            TransferItem {
+                file_id: crate::domain::model::transfer::FileId(item.file_id.clone()),
+                file_path: item.file_path.clone(),
+                file_size: item.file_size,
+                sha256: item.sha256.clone(),
+                status: crate::domain::model::transfer::TransferItemStatus::Pending,
+                chunk_manifest: ChunkManifest {
+                    chunks,
+                    chunk_size: cs,
+                },
+                chunks_done: 0,
+                temp_path: None,
+            }
+        })
+        .collect();
 
     let skip_chunks: Vec<SkipChunkDto> = vec![];
 
@@ -350,22 +451,24 @@ async fn handle_transfer_request(
         job_type: TransferType::Receive,
         peer_device_id: DeviceId(req.sender_device_id.clone()),
         share_id: None,
-        state: TransferState::Active { started_at: now_secs() },
+        state: TransferState::Active {
+            started_at: now_secs(),
+        },
         items,
         created_at: now_secs(),
     };
 
     if let Err(e) = state.transfer_repo.save(job).await {
         eprintln!("[Server] Failed to save receive job: {}", e);
-        return Json(TransferResponseDto { 
-            status: "rejected".to_string(), 
-            skip_chunks: vec![] 
+        return Json(TransferResponseDto {
+            status: "rejected".to_string(),
+            skip_chunks: vec![],
         });
     }
 
-    Json(TransferResponseDto { 
-        status: "accepted".to_string(), 
-        skip_chunks 
+    Json(TransferResponseDto {
+        status: "accepted".to_string(),
+        skip_chunks,
     })
 }
 
@@ -373,15 +476,23 @@ async fn handle_chunk_download(
     State(state): State<Arc<ServerAppState>>,
     AxumPath((job_id, file_id, chunk_index)): AxumPath<(String, String, u32)>,
 ) -> Result<Bytes, StatusCode> {
-    let job = state.transfer_repo.find_by_id(&JobId(job_id)).await
+    let job = state
+        .transfer_repo
+        .find_by_id(&JobId(job_id))
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let item = job.items.iter()
+    let item = job
+        .items
+        .iter()
         .find(|i| i.file_id.0 == file_id)
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let chunk = item.chunk_manifest.chunks.iter()
+    let chunk = item
+        .chunk_manifest
+        .chunks
+        .iter()
         .find(|c| c.index == chunk_index)
         .ok_or(StatusCode::NOT_FOUND)?;
 
@@ -391,7 +502,8 @@ async fn handle_chunk_download(
 
     let data = tokio::task::spawn_blocking(move || {
         ChunkHasher::read_chunk(std::path::Path::new(&file_path), offset, size as u64)
-    }).await
+    })
+    .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -410,18 +522,26 @@ async fn handle_chunk_upload(
     Query(params): Query<ChunkUploadQuery>,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let job = state.transfer_repo.find_by_id(&JobId(job_id)).await
+    let job = state
+        .transfer_repo
+        .find_by_id(&JobId(job_id))
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let item = job.items.iter()
-    .find(|i| i.file_id.0 == params.file_id)
-    .ok_or(StatusCode::NOT_FOUND)?;
+    let item = job
+        .items
+        .iter()
+        .find(|i| i.file_id.0 == params.file_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
 
-    let chunk = item.chunk_manifest.chunks.iter()
-    .find(|c| c.index == params.chunk_index)
-    .ok_or(StatusCode::NOT_FOUND)?;
-    
+    let chunk = item
+        .chunk_manifest
+        .chunks
+        .iter()
+        .find(|c| c.index == params.chunk_index)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
     if !chunk.hash.is_empty() && !ChunkHasher::verify_chunk(&body, &chunk.hash) {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
@@ -438,32 +558,38 @@ async fn handle_chunk_upload(
         }
 
         let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)  // chunk seek-write: preserve existing file content
-        .open(&file_path)
-        .map_err(|e| e.to_string())?;
+            .create(true)
+            .write(true)
+            .truncate(false) // chunk seek-write: preserve existing file content
+            .open(&file_path)
+            .map_err(|e| e.to_string())?;
 
         f.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
         f.write_all(&data).map_err(|e| e.to_string())
-
-    }).await
+    })
+    .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let file_id = FileId(params.file_id);
-    let updated = job.record_chunk_done(&file_id, params.chunk_index)
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let updated = job
+        .record_chunk_done(&file_id, params.chunk_index)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let is_complete = matches!(updated.state, TransferState::Verifying);
     let updated = if is_complete {
-        updated.complete().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        updated
+            .complete()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     } else {
         updated
     };
 
-    state.transfer_repo.save(updated).await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .transfer_repo
+        .save(updated)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(serde_json::json!({"status": "ok"})))
 }

@@ -9,6 +9,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   close: []
   confirm: [pin: string, certPem: string]
+  reject: []
 }>()
 
 const inputPin = ref(props.pin)
@@ -33,6 +34,7 @@ const certPem = ref('')
       </label>
 
       <div class="actions">
+       <button class="ghost" @click="emit('reject')">拒绝</button>
         <button class="ghost" @click="emit('close')">取消</button>
         <button class="primary" @click="emit('confirm', inputPin, certPem)">确认配对</button>
       </div>

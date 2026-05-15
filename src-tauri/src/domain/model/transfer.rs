@@ -112,12 +112,12 @@ impl TransferJob {
         job_type: TransferType,
         peer_device_id: DeviceId,
         files: Vec<FileRequest>,
-        chunking_strategy: &dyn crate::domain::service::chunking::ChunkingStrategy,
+        // chunking_strategy: &dyn crate::domain::service::chunking::ChunkingStrategy,
     ) -> Self {
         let mut items = Vec::new();
 
         for file in files {
-            let chunk_size = chunking_strategy.compute_chunk_size(file.file_size);
+            let chunk_size = crate::domain::service::chunking::compute_chunk_size(file.file_size);
             let mut chunks = Vec::new();
             
             if chunk_size == 0 {
