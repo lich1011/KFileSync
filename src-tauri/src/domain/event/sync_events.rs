@@ -49,3 +49,19 @@ impl DomainEvent for FileDeleted {
     fn event_type(&self) -> &str { "FileDeleted" }
     fn aggregate_id(&self) -> &str { &self.share_id.0 }
 }
+
+/// Fired whenever the local index for a share is mutated. Subscirbed by a 
+/// debonunced scheduler that triggers outbound sync to paired peers.
+#[derive(Debug,Clone)]
+pub struct LocalIndexChanged {
+    pub share_id:ShareId,
+}
+
+impl DomainEvent for LocalIndexChanged {
+    fn event_type(&self) -> &str {
+        "LocalIndexChanged"
+    }
+    fn aggregate_id(&self) -> &str {
+        &self.share_id.0
+    }
+}

@@ -2,6 +2,7 @@ import { createRouter, createWebHashHistory } from 'vue-router'
 import DevicesPage from '../views/DevicesPage.vue'
 import TransfersPage from '../views/TransfersPage.vue'
 import SharesPage from '../views/SharesPage.vue'
+import SyncPage from '../views/SyncPage.vue'
 
 const router = createRouter({
   history: createWebHashHistory(),

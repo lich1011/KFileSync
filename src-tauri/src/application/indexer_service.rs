@@ -1,7 +1,9 @@
 use crate::domain::error::DomainError;
+use crate::domain::event::sync_events::LocalIndexChanged;
 use crate::domain::model::device::DeviceId;
 use crate::domain::model::file_entry::{BlockInfo, BlockList, EntryType, FileEntry};
 use crate::domain::model::share::ShareId;
+use crate::domain::port::event_bus::{self, EventBus};
 use crate::domain::port::file_index_repo::FileIndexRepository;
 use crate::domain::port::file_watcher::{FileEvent, FileEventType, FileWatcher, WatchHandle};
 use crate::domain::port::share_repo::ShareRepository;
@@ -19,6 +21,7 @@ pub struct IndexerService {
     share_repo: Arc<dyn ShareRepository>,
     file_watcher: Arc<dyn FileWatcher>,
     local_device_id: DeviceId,
+    event_bus: Arc<dyn EventBus>,
     /// Tracks active watch handles to prevent duplicate registrations and enable cleanup.
     // chunking: Arc<dyn ChunkingStrategy>,
     active_watchers: Mutex<HashMap<ShareId, WatchHandle>>,
@@ -30,7 +33,7 @@ impl IndexerService {
         share_repo: Arc<dyn ShareRepository>,
         file_watcher: Arc<dyn FileWatcher>,
         local_device_id: DeviceId,
-        // chunking: Arc<dyn ChunkingStrategy>,
+        event_bus: Arc<dyn EventBus>, // chunking: Arc<dyn ChunkingStrategy>,
     ) -> Self {
         Self {
             file_index_repo,
@@ -38,6 +41,7 @@ impl IndexerService {
             file_watcher,
             local_device_id,
             // chunking,
+            event_bus,
             active_watchers: Mutex::new(HashMap::new()),
         }
     }
@@ -85,6 +89,7 @@ impl IndexerService {
         let share_id = share_id.clone();
         let share_root = std::path::PathBuf::from(&share.local_path);
         // let chunking = self.chunking.clone();
+        let event_bus = self.event_bus.clone();
 
         tokio::spawn(async move {
             Self::process_events(
@@ -93,6 +98,7 @@ impl IndexerService {
                 file_index_repo,
                 &mut rx,
                 &share_root,
+                event_bus,
             )
             .await;
         });
@@ -181,6 +187,7 @@ impl IndexerService {
         file_index_repo: Arc<dyn FileIndexRepository>,
         rx: &mut Receiver<FileEvent>,
         share_root: &std::path::Path,
+        event_bus: Arc<dyn EventBus>
     ) {
         let sync_ignore_path = share_root.join(".syncignore");
 
@@ -202,7 +209,7 @@ impl IndexerService {
 
             let is_dir = event.path.is_dir();
             // let ignore_context = IgnoreContext { path: relative_path, is_dir };
-            if ignore_space.is_ignored(relative_path,is_dir) {
+            if ignore_space.is_ignored(relative_path, is_dir) {
                 continue;
             }
 
@@ -268,6 +275,10 @@ impl IndexerService {
                                     "[IndexerService] Failed to save file entry for '{}': {}",
                                     path_str, e
                                 );
+                            } else {
+                                event_bus.publish(Box::new(LocalIndexChanged {
+                                    share_id: share_id.clone(),
+                                }));
                             }
                         }
                         Err(e) => {
@@ -286,11 +297,77 @@ impl IndexerService {
                                 "[IndexerService] Failed to save deletion for '{}': {}",
                                 path_str, e
                             );
+                        } else {
+                            event_bus.publish(Box::new(LocalIndexChanged {
+                                share_id: share_id.clone(),
+                            }));
                         }
                     }
                 }
-                FileEventType::Renamed { .. } => {
-                    // MVP simplification: treated as modify of new location
+                FileEventType::Renamed { ref from } => {
+                    // M11: treat rename as delete-old + modify-new
+                    let from_rel = from.strip_prefix(share_root).unwrap_or(from);
+                    let from_str = from_rel.to_string_lossy().to_string();
+                    if let Ok(Some(old)) = file_index_repo.find_by_path(share_id, &from_str).await {
+                        let tombstone = old.mark_deleted(local_device_id);
+                        if let Err(e) = file_index_repo.save(&tombstone).await {
+                            eprintln!(
+                                "[IndexerService] Failed to mark renamed file deleted '{}': {}",
+                                from_str, e
+                            );
+                        }
+                    }
+
+                    // The new path will get a Created event from the watcher; if not, fall
+                    // back to treating this rename as a Modified for the target path here.
+                    if event.path.is_file() {
+                        let abs_path = event.path.clone();
+                        let device_id = local_device_id.clone();
+                        let computed = tokio::task::spawn_blocking(move || -> Result<(u64, String, Vec<crate::domain::model::transfer::ChunkInfo>), DomainError> {
+                            let meta = std::fs::metadata(&abs_path)
+                                .map_err(|e| DomainError::FileSystem(e.to_string()))?;
+                            let size = meta.len();
+                            let sha256 = ChunkHasher::compute_sha256(&abs_path)?;
+                            let chunk_size = chunking::compute_chunk_size(size);
+                            let blocks = ChunkHasher::hash_file_chunks(&abs_path, chunk_size)?;
+                            Ok((size, sha256, blocks))
+                        }).await.unwrap_or_else(|e| Err(DomainError::FileSystem(e.to_string())));
+
+                        if let Ok((size, sha256, chunks)) = computed {
+                            let blocks = BlockList(
+                                chunks
+                                    .into_iter()
+                                    .map(|c| BlockInfo {
+                                        index: c.index,
+                                        size: c.size,
+                                        hash: c.hash,
+                                    })
+                                    .collect(),
+                            );
+
+                            let mut new_entry = FileEntry::new(
+                                share_id.clone(),
+                                path_str.clone(),
+                                EntryType::File,
+                                &device_id,
+                            );
+
+                            new_entry.size = size;
+                            new_entry.sha256 = Some(sha256);
+                            new_entry.blocks = blocks;
+
+                            if let Err(e) = file_index_repo.save(&new_entry).await {
+                                eprintln!(
+                                    "[IndexerService] Failed to save renamed-to file '{}': {}",
+                                    path_str, e
+                                );
+                            } else {
+                                event_bus.publish(Box::new(LocalIndexChanged {
+                                    share_id: share_id.clone(),
+                                }));
+                            }
+                        }
+                    }
                 }
             }
         }

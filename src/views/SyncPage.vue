@@ -2,7 +2,7 @@
 import { ref, onMounted } from 'vue'
 import { useSyncStore } from '../stores/sync'
 import { getPairedDevices } from '../api/tauri'
-import type { PairedDevice, ShareInfo } from '../types'
+import type { PairedDevice } from '../types'
 import { useShareStore } from '../stores/shares'
 import { useNotificationStore } from '../stores/notifications'
 
@@ -39,7 +39,16 @@ async function onSync() {
 async function onDismissConflict(conflictId: string) {
   await syncStore.dismissConflict(conflictId)
 }
+
+async function onResolve(
+    conflictId: string,
+    resolution: 'keep_local' | 'keep_remote' | 'keep_both'
+){
+    await syncStore.resolveConflictAs(conflictId, resolution)
+}
+
 </script>
+
 
 <template>
   <div class="sync-page">
@@ -86,7 +95,12 @@ async function onDismissConflict(conflictId: string) {
       <div v-for="c in syncStore.conflicts" :key="c.conflictId" class="conflict-item">
         <span class="conflict-path">{{ c.filePath }}</span>
         <span class="conflict-resolution">{{ c.resolution }}</span>
-        <button class="btn btn--small" @click="onDismissConflict(c.conflictId)">Dismiss</button>
+        <div class="conflict-actions">
+            <button class="btn btn--small" @click="onResolve(c.conflictId, 'keep_local')">Keep Local</button>
+            <button class="btn btn--small" @click="onResolve(c.conflictId, 'keep_remote')">Keep Remote</button>
+            <button class="btn btn--small" @click="onResolve(c.conflictId, 'keep_both')">Keep Both</button>
+            <button class="btn btn--small" @click="onDismissConflict(c.conflictId)">Dismiss</button>
+        </div>
       </div>
     </div>
 
@@ -180,6 +194,11 @@ async function onDismissConflict(conflictId: string) {
   border: 1px solid var(--border);
   border-radius: 6px;
   margin-bottom: 8px;
+}
+
+.conflict-actions {
+  display: flex;
+  gap: 6px;
 }
 
 .conflict-path {

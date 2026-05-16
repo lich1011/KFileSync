@@ -7,7 +7,7 @@ use axum::{
 };
 use axum_server::tls_rustls::RustlsConfig;
 use serde::Deserialize;
-use sha2::digest::Update;
+use core::time;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -259,9 +259,16 @@ async fn handle_share_invite(
             }
         }
         Ok(None) => {
+
+            let safe_share_name = std::path::Path::new(&req.share_name)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .filter(|n| !n.is_empty() && !n.contains(['/','\\']))
+                .unwrap_or_else(|| format!("share-{}", req.share_id));
+
             let local_path = dirs::download_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(&req.share_name)
+                .join(&safe_share_name)
                 .to_string_lossy()
                 .to_string();
 
@@ -347,14 +354,38 @@ struct SyncIndexQuery {
     share_id: String,
     #[allow(dead_code)]
     since_version: Option<u64>,
+    caller_device_id: String,
+    timestamp: u64,
+    nonce: String
 }
 
 async fn handle_sync_index(
     State(state): State<Arc<ServerAppState>>,
     Query(query): Query<SyncIndexQuery>,
-) -> Json<SyncIndexResponseDto> {
+) -> Result<Json<SyncIndexResponseDto>, StatusCode> {
+    //Anti-replay
+    if state.nonce_validator.validate(&query.nonce, query.timestamp).is_err() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    let caller_id = DeviceId(query.caller_device_id.clone());
+    // Caller must be a Paired device
+    match state.device_repo.find_by_id(caller_id.clone()).await {
+        Ok(Some(device)) if matches!(device.state, DeviceState::Paired(_))=>{}
+        _ => return Err(StatusCode::FORBIDDEN)
+    }
+
     let share_id = crate::domain::model::share::ShareId(query.share_id.clone());
 
+    //Caller must be a member of the requested share
+    match state.share_repo.find_by_id(&share_id).await {
+        Ok(Some(share)) => {
+            if !share.has_member(&caller_id){
+                return  Err(StatusCode::FORBIDDEN);
+            }
+        }
+        _ => return Err(StatusCode::NOT_FOUND)
+    }
     let entries = state
         .file_index_repo
         .find_all_by_share(&share_id)
@@ -363,11 +394,11 @@ async fn handle_sync_index(
 
     let index_version = entries.iter().map(|e| e.modified_at).max().unwrap_or(0);
 
-    Json(SyncIndexResponseDto {
+    Ok(Json(SyncIndexResponseDto {
         share_id: query.share_id,
         index_version,
         entries,
-    })
+    }))
 }
 
 // ---- Transfer ----
@@ -397,10 +428,50 @@ async fn handle_transfer_request(
         });
     }
 
+    //sender must be a Paired device
+    let send_id = DeviceId(req.sender_device_id.clone());
+    match state.device_repo.find_by_id(send_id.clone()).await{
+        Ok(Some(device)) if matches!(device.state,DeviceState::Paired(_))=>{}
+        _ =>{
+            eprintln!("[Server] Reject transfer: send {} not paired", req.sender_device_id);
+            return Json(TransferResponseDto {
+                status: "rejected: sender not paired".to_string(),
+                skip_chunks: vec![],
+            });
+        }
+    }
+
+    //resolve receive base dir and refuse paths that escape it
+    let base_dir = dirs::download_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let recv_dir = base_dir.join("KFileSync").join(&req.sender_device_id);
+
+    if let Err(e) = std::fs::create_dir_all(&recv_dir) {
+        eprintln!("[Server] Fail to create receive dir: {}", e);
+        return Json(TransferResponseDto {
+            status: "rejected: storage error".to_string(),
+            skip_chunks: vec![],
+        });
+    }
+
+    let cononical_recv = match recv_dir.canonicalize() {
+        Ok(p) => p,
+        Err(_) => recv_dir.clone()
+    };
+
     let items: Vec<TransferItem> = req
         .items
         .iter()
         .map(|item| {
+
+            //Sanitize file_path: take only the base name and place it unde recv_dir.
+            //This prevents directory traversal regadless of what teh sender claims.
+            let safe_name = std::path::Path::new(&item.file_path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| format!("file-{}",item.file_id));
+            let target =cononical_recv.join(&safe_name);
+            let target_str = target.to_string_lossy().to_string();
+
             let mut chunks = Vec::new();
             let cs = item.chunk_size;
 
@@ -409,7 +480,7 @@ async fn handle_transfer_request(
                     index: 0,
                     offset: 0,
                     size: item.file_size as u32,
-                    hash: String::new(),
+                    hash: String::new(), //BLAKE3 verification skipper for 0-chunks-size mode
                 });
             } else {
                 let mut offset = 0u64;
@@ -420,6 +491,8 @@ async fn handle_transfer_request(
                         index: idx,
                         offset,
                         size: sz,
+                        // Sender compute BLAKE3 locally; receiver only knows the count.
+                        // Per-chunk integrity is enforced via SHA-256 of the whole file at completion.
                         hash: String::new(),
                     });
                     offset += sz as u64;
@@ -429,7 +502,7 @@ async fn handle_transfer_request(
 
             TransferItem {
                 file_id: crate::domain::model::transfer::FileId(item.file_id.clone()),
-                file_path: item.file_path.clone(),
+                file_path: target_str,
                 file_size: item.file_size,
                 sha256: item.sha256.clone(),
                 status: crate::domain::model::transfer::TransferItemStatus::Pending,

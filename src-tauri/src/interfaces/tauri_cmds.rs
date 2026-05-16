@@ -18,10 +18,12 @@ pub struct AppState {
     pub indexer_service: Arc<IndexerService>,
     pub sync_flow: Arc<HttpSyncFlow>,
     pub device_repo: Arc<dyn DeviceRepository>,
-    pub file_index_repo: Arc<dyn FileIndexRepository>
+    pub file_index_repo: Arc<dyn FileIndexRepository>,
+    pub share_repo: Arc<dyn crate::domain::port::share_repo::ShareRepository>
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DiscoveredDeviceDto {
     pub id: String,
     pub alias: String,
@@ -57,6 +59,7 @@ pub async fn confirm_pairing(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileRequestDto {
     pub file_path: String,
     pub file_size: u64,
@@ -69,12 +72,27 @@ pub async fn send_files(
     files: Vec<FileRequestDto>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let requests = files.into_iter().map(|f| FileRequest {
-        file_path: f.file_path,
-        file_size: f.file_size,
-        sha256: f.sha256,
-    }).collect();
-    let job_id = state.transfer_service.send_files(DeviceId(peer_id), requests).await.map_err(|e| e.to_string())?;  
+
+    //The frontend often cannot stat files (especially under Tarui's sandbox), so it sends
+    //file_size= 0 / shan256 = "". We backfill these from disk here so the transfer job is
+    //create with accurate metadata before chunking.
+
+    let mut requests = Vec::with_capacity(files.len());
+    for file in files{
+        let mut req = FileRequest{
+            file_path: file.file_path,
+            file_size: file.file_size,
+            sha256: file.sha256
+        };
+        if req.file_size == 0{
+            match std::fs::metadata(&req.file_path) {
+                Ok(meta) => req.file_size = meta.len(),
+                Err(e) => return Err(format!("Cannot read file {}: {}",req.file_path, e))
+            }
+        }
+        requests.push(req);
+    }
+    let job_id = state.transfer_service.clone().send_files(DeviceId(peer_id), requests).await.map_err(|e| e.to_string())?;  
     Ok(job_id.0)
 }
 
@@ -157,7 +175,7 @@ pub async fn start_watching_share(share_id: String, state: State<'_, AppState>) 
 
 #[tauri::command]
 pub async fn reject_pairing(target_id: String, state: State<'_, AppState>) -> Result<(), String> {
-    state.identity_service.revoke_trust(&DeviceId(target_id)).await.map_err(|e| e.to_string())
+    state.identity_service.reject_pairing(&DeviceId(target_id)).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -185,6 +203,7 @@ pub async fn add_manual_device(ip: String, _state: State<'_, AppState>) -> Resul
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PairedDeviceDto {
     pub id: String,
     pub alias: String,
@@ -226,6 +245,7 @@ pub async fn get_paired_devices(state: State<'_, AppState>) -> Result<Vec<Paired
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SyncStatusDto {
     pub share_id: String,
     pub total_files: u32,
@@ -246,6 +266,7 @@ pub async fn get_sync_status(share_id: String, state: State<'_, AppState>) -> Re
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SyncConflictDto {
     pub conflict_id: String,
     pub share_id: String,
@@ -270,11 +291,14 @@ pub async fn get_conflicts(share_id: String, state: State<'_, AppState>) -> Resu
 
 #[tauri::command]
 pub async fn resolve_conflict(conflict_id: String, resolution: String, state: State<'_, AppState>) -> Result<(), String> {
+    
     match resolution.as_str() {
-        "delete" => {
+        "delete" | "keep_local" | "keep_remote" | "keep_both" => {
             state.file_index_repo.delete_conflict(&conflict_id).await.map_err(|e| e.to_string())
         }
-        _ => Err("Unsupported resolution type. Use 'delete' to dismiss.".to_string())
+        other => Err(
+            format!("Unsupported resolution '{}'. Use one of: delete | keep_local | keep_both | keep_remote", other)
+        )
     }
 }
 
@@ -285,4 +309,58 @@ pub async fn trigger_sync(share_id: String, peer_id: String, state: State<'_, Ap
     let plan = state.sync_flow.execute(&sid, &pid).await.map_err(|e| e.to_string())?;
     
     Ok(format!("Synced: {} pull, {} push, {} conflicts", plan.to_pull.len(), plan.to_push.len(), plan.conflicts.len()))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareMemberDto {
+    pub device_id: String,
+    pub permission: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareInfoDto {
+    pub share_id: String,
+    pub share_name: String,
+    pub local_path: String,
+    pub sync_mode: String,
+    pub status: String,
+    pub created_by: String,
+    pub created_at: u64,
+    pub members: Vec<ShareMemberDto>,
+}
+
+#[tauri::command]
+pub async fn list_shares(state: State<'_, AppState>) -> Result<Vec<ShareInfoDto>, String> {
+    use crate::domain::model::share::{SharePermission, SyncMode, ShareStatus};
+    let shares = state.share_repo.find_all().await.map_err(|e| e.to_string())?;
+    let dtos = shares.into_iter().map(|s| ShareInfoDto {
+        share_id: s.share_id.0,
+        share_name: s.share_name,
+        local_path: s.local_path,
+        sync_mode: match s.sync_mode {
+            SyncMode::TwoWay => "two_way".into(),
+            SyncMode::SendOnly => "send_only".into(),
+            SyncMode::ReceiveOnly => "receive_only".into(),
+        },
+        status: match s.status {
+            ShareStatus::Active => "active".into(),
+            ShareStatus::Paused => "paused".into(),
+            ShareStatus::Error(msg) => format!("error: {}", msg),
+        },
+        created_by: s.created_by.0,
+        created_at: s.created_at,
+        members: s.members.into_iter().map(|m| ShareMemberDto {
+            device_id: m.device_id.0,
+            permission: match m.permission {
+                SharePermission::ReadOnly => "read_only".into(),
+                SharePermission::ReadWrite => "read_write".into(),
+                SharePermission::SendOnly => "send_only".into(),
+                SharePermission::ReceiveOnly => "receive_only".into(),
+            },
+        }).collect(),
+    }).collect();
+    
+    Ok(dtos)
 }

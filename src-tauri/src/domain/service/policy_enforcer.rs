@@ -80,6 +80,10 @@ impl PolicyEnforcer {
             )));
         }
 
+        // SyncMOde semantics : "this share's purpose is X relative to remote peer".
+        // SendOnly -> we (this device) push, peers may not to push to us -> reject Push from peer.
+        // ReceiveOnly -> we receive, peers may not allow to pull from us -> rejec Pull by peer.
+
         match share.sync_mode {
             SyncMode::SendOnly if action == SyncDirection::Push => {
                 return Err(DomainError::PermissionDenied(
@@ -89,7 +93,7 @@ impl PolicyEnforcer {
 
             SyncMode::ReceiveOnly if action == SyncDirection::Pull => {
                 return Err(DomainError::PermissionDenied(
-                    "Share is ReceiveOnly: peers cannot push".into()
+                    "Share is ReceiveOnly: peers cannot pull".into()
                 ));
             }
 

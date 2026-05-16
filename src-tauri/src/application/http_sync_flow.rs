@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+use axum::extract::path;
+use reqwest::redirect::Action;
+
 use crate::domain::error::DomainError;
 use crate::domain::model::device::DeviceId;
 use crate::domain::model::file_entry::{
@@ -127,7 +130,40 @@ impl HttpSyncFlow {
         Ok(plan)
     }
 
+    fn validate_relative_path(p: &str) -> Result<(),DomainError>{
+        let path=std::path::Path::new(p);
+        if path.is_absolute(){
+            return Err(DomainError::PermissionDenied(format!("absolute path not allow: {}",p)));   
+        }
+
+        for comp in path.components(){
+            match comp {
+                std::path::Component::ParentDir =>{
+                    return Err(DomainError::PermissionDenied(format!("path traversal denied: {}",p)));
+                }
+                std::path::Component::Prefix(_) | std::path::Component::RootDir =>{
+                    return Err(DomainError::PermissionDenied(format!("absolute/root path denied: {}",p)));
+                }
+                _ =>{}
+            }
+        }
+
+        Ok(())
+    }
+
     async fn execute_plan(&self, plan: &SyncPlan, peer: &DeviceId) -> Result<(), DomainError> {
+        // validate every path the remote peer is asking us to read or write.
+        for action in plan.to_pull.iter().chain(plan.to_push.iter()){
+            Self::validate_relative_path(&action.path);
+        }
+
+        for conflict in &plan.conflicts{
+            Self::validate_relative_path(&conflict.path);
+            if let ConflictResolution::KeepBoth { conflict_copy_path } = &conflict.resolution{
+                Self::validate_relative_path(conflict_copy_path);
+            }
+        }
+
         // Create a SyncPull TransferJob for files we need to pull from the peer
         if !plan.to_pull.is_empty() {
             // let pull_files: Vec<FileRequest> = plan.to_pull.iter().map(|action| {

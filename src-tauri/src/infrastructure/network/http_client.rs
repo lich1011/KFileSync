@@ -1,10 +1,11 @@
 use async_trait::async_trait;
 use reqwest::{Client, ClientBuilder};
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64,Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::domain::error::DomainError;
+use crate::domain::model::device;
 use crate::domain::port::network::{NetworkClient, PairingRequest, PairingResponse, ShareInvite, 
     TransferResponse, SkipChunkInfo};
 use super::dto::{PairRequestDto, PairResponseDto, ShareInviteDto, TransferRequestDto, TransferResponseDto, TransferRequestItemDto};
@@ -17,17 +18,20 @@ pub struct ReqwestNetworkClient {
     client: Mutex<Client>,
     tls_config: Arc<TlsRotationConfig>,
     created_at: Mutex<Instant>,
-    bytes_transferred: AtomicU64,  
+    bytes_transferred: AtomicU64,
+    local_device_id: Mutex<Option<String>>
 }
 
 struct TlsRotationConfig {
     max_age: Duration,
     max_byte: u64,
     trusted_fingerprints: Arc<Mutex<std::collections::HashSet<String>>>,
+    bootstrap: Arc<AtomicBool>
 }
 
 mod cert_pinning {
     use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::collections::HashSet;
     use sha2::{Sha256, Digest};
     use rustls::client::danger::{ServerCertVerifier, ServerCertVerified, HandshakeSignatureValid};
@@ -37,13 +41,15 @@ mod cert_pinning {
     #[derive(Debug)]
     pub struct FingerprintVerifier {
         trusted: Arc<Mutex<HashSet<String>>>,
+        bootstrap: Arc<AtomicBool>,
         schemes: Vec<SignatureScheme>,
     }
 
     impl FingerprintVerifier {
-        pub fn new(trusted: Arc<Mutex<HashSet<String>>>) -> Self {
+        pub fn new(trusted: Arc<Mutex<HashSet<String>>>, bootstrap: Arc<AtomicBool>) -> Self {
             Self {
                 trusted,
+                bootstrap,
                 schemes: vec![
                     SignatureScheme::ECDSA_NISTP256_SHA256,
                     SignatureScheme::ECDSA_NISTP384_SHA384,
@@ -74,19 +80,18 @@ mod cert_pinning {
             let trusted = self.trusted.lock()
                 .map_err(|_| Error::General("Lock poisoned".into()))?;
 
-            // During initial pairing, no fingerprints are registered yet.
-            // Allow connection if the trust store is empty (bootstrapping).
-            if trusted.is_empty() {
+            if trusted.contains(&fingerprint) {
                 return Ok(ServerCertVerified::assertion());
             }
 
-            if trusted.contains(&fingerprint) {
-                Ok(ServerCertVerified::assertion())
-            } else {
-                Err(Error::General(format!(
-                    "Certificate fingerprint {} not in trusted set", fingerprint
-                )))
+            if self.bootstrap.load(Ordering::SeqCst) {
+                return Ok(ServerCertVerified::assertion());
             }
+
+            Err(Error::General(format!(
+                "Certificate fingerprint {} not in trusted set", fingerprint
+            )))
+            
         }
 
         fn verify_tls12_signature(
@@ -128,7 +133,8 @@ impl ReqwestNetworkClient {
         // Accept self-signed certs because devices generate their own certs.
         // Real security is done via SHA-256 fingerprint pinning after pairing.
        let trusted_fingerprints = Arc::new(Mutex::new(std::collections::HashSet::new()));
-       let client = Self::build_client(trusted_fingerprints.clone())?;
+       let bootstrap = Arc::new(AtomicBool::new(false));
+       let client = Self::build_client(trusted_fingerprints.clone(),bootstrap.clone())?;
 
         Ok(Self { 
             client: Mutex::new(client),
@@ -136,14 +142,29 @@ impl ReqwestNetworkClient {
                 max_age: Duration::from_secs(3600),
                 max_byte: 1_073_741_824,
                 trusted_fingerprints,
+                bootstrap
             }),
             created_at: Mutex::new(Instant::now()),
-            bytes_transferred: AtomicU64::new(0),  
+            bytes_transferred: AtomicU64::new(0),
+            local_device_id: Mutex::new(None)
         })
     }
 
-    fn build_client(trusted_fingerprints: Arc<Mutex<HashSet<String>>>) -> Result<Client, DomainError> {
-        let verifier =  cert_pinning::FingerprintVerifier::new(trusted_fingerprints);
+    pub fn set_local_device_id(&self, device_id: String){
+        if let Ok(mut g) = self.local_device_id.lock(){
+            *g =Some(device_id);
+        }
+    }
+
+    fn caller_id(&self) -> String{
+        self.local_device_id.lock().ok().and_then(|g| g.clone()).unwrap_or_default()
+    }
+
+    fn build_client(
+        trusted_fingerprints: Arc<Mutex<HashSet<String>>>,
+        bootstrap: Arc<AtomicBool>
+    ) -> Result<Client, DomainError> {
+        let verifier =  cert_pinning::FingerprintVerifier::new(trusted_fingerprints,bootstrap);
 
         let tls_config = rustls::ClientConfig::builder()
             .dangerous()
@@ -156,6 +177,18 @@ impl ReqwestNetworkClient {
             .build()
             .map_err(net_err)
     }
+
+    /// Enable TOFU mode - accept any cert prestend by the peer. Use ONLY during a pairing
+    /// flow that is guarded by an out-of-band PIN/code. Always pair this with a matching 
+    /// `disable_bootstrap()` call when pairing finishes (success OR failure).
+    pub fn endable_bootstrap(&self) {
+        self.tls_config.bootstrap.store(true, Ordering::SeqCst);
+    }
+
+    pub fn disable_bootstrap(&self) {
+        self.tls_config.bootstrap.store(false, Ordering::SeqCst);
+    }
+
 
     pub fn add_trusted_fingerprint(&self, fingerprint: &str) {
         if let Ok(mut fps) = self.tls_config.trusted_fingerprints.lock(){
@@ -178,7 +211,10 @@ impl ReqwestNetworkClient {
         };
 
         if should_rotate {
-            if let Ok(new_client) = Self::build_client(self.tls_config.trusted_fingerprints.clone()) {
+            if let Ok(new_client) = Self::build_client(
+                self.tls_config.trusted_fingerprints.clone(),
+                self.tls_config.bootstrap.clone()
+            ) {
                 if let Ok(mut client) = self.client.lock() {
                     *client = new_client;
                 }
@@ -204,8 +240,9 @@ impl ReqwestNetworkClient {
     }
 
     fn generate_nanoc() -> String{
-        format!("{:016x}", rand::random::<u64>())
-
+        use rand::RngCore;
+        let mut rng = rand::rngs::OsRng;
+        format!("{:016x}", rng.next_u64())
     }
 
     fn now_timestamp() -> u64 { 
@@ -280,9 +317,18 @@ impl NetworkClient for ReqwestNetworkClient {
     async fn fetch_remote_index(&self, peer_ip: &str, port: u16, share_id: &str) -> Result<String, DomainError> {
         let url = Self::format_url(peer_ip, port, "/sync/index");   
         let client = self.get_client();
+        let caller = self.caller_id();
+        let ts = Self::now_timestamp().to_string();
+        let nonce = Self::generate_nanoc();
 
         let response = client.get(&url)
-            .query(&[("share_id", share_id), ("since_version", "0")])
+            .query(&[
+                ("share_id", share_id.to_string()), 
+                ("since_version", "0".to_string()),
+                ("caller_device_id", caller),
+                ("timestamp",ts),
+                ("nonce",nonce)
+            ])
             .send()
             .await
             .map_err(net_err)?;
@@ -337,7 +383,7 @@ impl NetworkClient for ReqwestNetworkClient {
     
     async fn download_chunk(&self, peer_ip: &str, port: u16, job_id: &str, file_id: &str, chunk_index: u32) -> Result<Vec<u8>, DomainError> {
         let url = Self::format_url(peer_ip, port, 
-            &format!("/transfer/{}/{}/chunk/{}", job_id, file_id, chunk_index));
+            &format!("/transfer/{}/chunk/{}/{}", job_id, file_id, chunk_index));
         let client = self.get_client();
 
         let response = client.get(&url)

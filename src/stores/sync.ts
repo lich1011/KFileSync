@@ -30,8 +30,15 @@ export const useSyncStore = defineStore('sync', () => {
   }
 
   async function dismissConflict(conflictId: string) {
+    return resolveConflictAs(conflictId,'delete')
+  }
+
+  async function resolveConflictAs(
+    conflictId: string, 
+    resolution: 'delete' | 'keep_local' | 'keep_remote' | 'keep_both'){
+
     try {
-      await resolveConflict(conflictId, 'delete')
+      await resolveConflict(conflictId, resolution)
       conflicts.value = conflicts.value.filter(c => c.conflictId !== conflictId)
     } catch (e: any) {
       error.value = e.toString()
@@ -61,7 +68,8 @@ export const useSyncStore = defineStore('sync', () => {
     error, 
     fetchStatus, 
     fetchConflicts, 
-    dismissConflict, 
+    dismissConflict,
+    resolveConflictAs, 
     syncNow 
   }
 })

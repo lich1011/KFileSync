@@ -15,6 +15,26 @@ impl DomainEvent for TransferRequested {
 }
 
 #[derive(Debug, Clone)]
+pub struct TransferProgressUpdated{
+    pub job_id: JobId,
+    pub file_id: FileId,
+    pub chunks_done: u32,
+    pub total_chunks: u32,
+    pub bytes_done: u64,
+    pub total_bytes: u64
+}
+
+impl DomainEvent for TransferProgressUpdated {
+    fn event_type(&self) -> &str {
+        "TransferProgressUpdated"
+    }
+
+    fn aggregate_id(&self) -> &str {
+        &self.job_id.0
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct TransferCompleted {
     pub job_id: JobId,
     pub total_bytes: u64,

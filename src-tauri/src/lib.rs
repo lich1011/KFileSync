@@ -13,9 +13,8 @@ use application::{
 };
 use domain::model::transfer::TransferState;
 use domain::port::transfer_repo::TransferRepository;
-use std::path::PathBuf;
+use std::{net::Shutdown, path::PathBuf};
 use std::sync::Arc;
-// use domain::port::audit_repo::AuditLogRepository;
 
 use domain::service::policy_enforcer::PolicyEnforcer;
 use infrastructure::{
@@ -30,7 +29,6 @@ use infrastructure::{
     },
     persistence::{
         init_database,
-        // sqlite_audit_repo::SqliteAuditLogRepository,
         sqlite_device_repo::SqliteDeviceRepository,
         sqlite_file_index_repo::SqliteFileIndexRepository,
         sqlite_share_repo::SqliteShareRepository,
@@ -40,17 +38,17 @@ use infrastructure::{
     security::platform_keystore::PlatformKeyStore,
     system::notify_watcher::NotifyWatcherAdapter,
 };
+
 use interfaces::tauri_cmds::{
     accept_transfer, add_manual_device, cancel_transfer, confirm_pairing, create_share,
     discover_devices, get_conflicts, get_paired_devices, get_sync_status, invite_to_share,
-    pause_transfer, reject_pairing, remove_share_member, request_pairing, resolve_conflict,
-    resume_transfer, send_files, start_watching_share, trigger_sync, AppState,
+    list_shares, pause_transfer, reject_pairing, remove_share_member, request_pairing, 
+    resolve_conflict, resume_transfer, send_files, start_watching_share, trigger_sync, AppState,
 };
-use tower_http::follow_redirect::policy;
 
-use crate::infrastructure::{
-    events::security_handler, network::discovery::http_scan::HttpScanStrategy,
-};
+use crate::infrastructure::network::discovery::http_scan::HttpScanStrategy;
+use tokio_util::sync::CancellationToken;
+use tauri::Emitter;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -71,6 +69,9 @@ pub fn run() {
     // Basic setup for DI
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
+
+    // Root cancellation token: cancelled when Tauri exits, signals every background task to stop.
+    let shutdown = CancellationToken::new();
 
     let data_dir = resolve_data_dir();
     std::fs::create_dir_all(&data_dir).expect("Failed to create app data path");
@@ -150,6 +151,9 @@ pub fn run() {
     // 12.  Network Client
     let network_client =
         Arc::new(ReqwestNetworkClient::new().expect("Failed to init NetworkClient"));
+    
+    network_client.set_local_device_id(local_device_id.0.clone());
+    network_client.endable_bootstrap();
 
     // 13. Crash Recovery: recover interrupted transfers job
 
@@ -244,6 +248,7 @@ pub fn run() {
         file_watcher.clone(),
         local_device_id.clone(),
         // chunking_strategy,
+        event_bus.clone()
     ));
 
     {
@@ -300,12 +305,17 @@ pub fn run() {
     // 16. Tombstone Cleanup Scheduler: every 6 hours, purge tombstones older than 30 days
     {
         let file_index_repo_ref = file_index_repo.clone();
+        let token = shutdown.clone();
         rt.spawn(async move {
             const CLEANUP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
             const TOMBSTONE_TTL_SECS: u64 = 30 * 24 * 3600;
 
             loop {
-                tokio::time::sleep(CLEANUP_INTERVAL).await;
+
+                tokio::select! {
+                    _ = token.cancelled() =>break,
+                    _ = tokio::time::sleep(CLEANUP_INTERVAL) =>{}
+                }
 
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -327,17 +337,23 @@ pub fn run() {
                     _ => {}
                 }
             }
+            println!("[TombstoneCleanup] Shutting down");
         });
     }
 
     // 16a. Retry scheduler: check failed transfers every 30s
     {
         let retry_transfer_service = transfer_service.clone();
+        let token = shutdown.clone();
         rt.spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                tokio::select! {
+                    _ = token.cancelled() =>break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(30)) =>{}
+                }
                 retry_transfer_service.retry_failed_transfers().await;
             }
+            println!("[RetryScheduler] Shutting down");
         });
     }
 
@@ -345,6 +361,7 @@ pub fn run() {
     {
         let heartbeat_device_repo: Arc<dyn domain::port::repository::DeviceRepository> =
             device_repo.clone();
+        let token = shutdown.clone();
         rt.spawn(async move {
             let client = reqwest::Client::builder()
                 .danger_accept_invalid_certs(true)
@@ -353,8 +370,10 @@ pub fn run() {
                 .unwrap();
 
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-
+                tokio::select! {
+                    _ = token.cancelled() =>break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(30)) =>{}
+                }
                 let paired = match heartbeat_device_repo.find_paired().await {
                     Ok(devices) => devices,
                     Err(_) => continue,
@@ -392,6 +411,87 @@ pub fn run() {
                     }
                 }
             }
+            println!("[Heartbeat] Shutting down");
+        });
+    }
+    // 16c. Auto-sync scheduler (H2): subscribe to LocalIndexChanged, debounce 5 s,
+    // then trigger sync_flow for every paired device that's a member of that share.
+    {
+        let mut rx_auto = event_bus.subscribe();
+        let sync_flow_ref = sync_flow.clone();
+        let share_repo_ref: Arc<dyn domain::port::share_repo::ShareRepository> = share_repo.clone();
+        let device_repo_ref: Arc<dyn domain::port::repository::DeviceRepository> = device_repo.clone();
+        let token = shutdown.clone();
+
+        rt.spawn(async move {
+            use std::collections::HashMap;
+            use std::time::{Duration, Instant};
+            
+            const DEBOUNCE: Duration = Duration::from_secs(5);
+            let mut pending: HashMap<domain::model::share::ShareId, Instant> = HashMap::new();
+
+            loop {
+                // Wait for either a new event, a tick, or shutdown.
+                let recv_result: Option<Result<Arc<dyn domain::port::event_bus::DomainEvent>, _>> = tokio::select! {
+                    _ = token.cancelled() => {
+                        break;
+                    }
+                    e = rx_auto.recv() => Some(e),
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => None,
+                };
+
+                // Tick path: flush due entries
+                if recv_result.is_none() {
+                    let now = Instant::now();
+                    let due: Vec<_> = pending.iter()
+                        .filter(|(_, t)| now.duration_since(**t) >= DEBOUNCE)
+                        .map(|(k, _)| k.clone())
+                        .collect();
+
+                    for share_id in due {
+                        pending.remove(&share_id);
+                        let share = match share_repo_ref.find_by_id(&share_id).await {
+                            Ok(Some(s)) => s,
+                            _ => continue,
+                        };
+
+                        let local_devices = match device_repo_ref.find_paired().await {
+                            Ok(d) => d,
+                            Err(_) => continue,
+                        };
+
+                        let paired_ids: std::collections::HashSet<domain::model::device::DeviceId> = local_devices
+                            .iter()
+                            .map(|d| d.id.clone())
+                            .collect();
+
+                        for member in &share.members {
+                            if paired_ids.contains(&member.device_id) {
+                                let svc = sync_flow_ref.clone();
+                                let sid = share_id.clone();
+                                let pid = member.device_id.clone();
+                                
+                                tokio::spawn(async move {
+                                    if let Err(e) = svc.execute(&sid, &pid).await {
+                                        eprintln!("[AutoSync] {} -> {} failed: {}", sid.0, pid.0, e);
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                // Event path: queue this share for the next debounced flush.
+                if let Some(Ok(ev)) = recv_result {
+                    if ev.event_type() == "LocalIndexChanged" {
+                        let share_id = domain::model::share::ShareId(ev.aggregate_id().to_string());
+                        pending.insert(share_id, Instant::now());
+                    }
+                }
+            }
+
+            println!("[AutoSync] Shutting down");
         });
     }
 
@@ -424,19 +524,63 @@ pub fn run() {
     });
 
     let app_state = AppState {
-        identity_service,
+        identity_service: identity_service.clone(),
         transfer_service,
         share_service,
-        indexer_service,
+        indexer_service: indexer_service.clone(),
         sync_flow,
         device_repo: device_repo.clone(),
         file_index_repo: file_index_repo.clone(),
+        share_repo: share_repo.clone()
     };
+
+    let shutdown_for_exit = shutdown.clone();
+    let event_bus_for_app = event_bus.clone();
 
     tauri::Builder::default()
         .manage(app_state)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .setup(move |app| {
+            // Bridge domain events from EventBus to the Tauri fronted.
+            // Only transfer-related events flow through; other events stay internal.
+            let handle = app.handle().clone();
+            let mut rx = event_bus_for_app.subscribe();
+            let token = shutdown.clone();
+
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    let received = tokio::select! {
+                        _ = token.cancelled() =>{ break; }
+                        ev = rx.recv() => ev
+                    };
+
+                    let event = match received {
+                        Ok(e) => e,
+                        Err(_) => continue
+                    };
+
+                    match event.event_type(){
+                        "TransferProgressUpdated"
+                        |"TransferCompleted"
+                        |"TransferFailed"
+                        |"TransferRequested"
+                        |"ConflictDetected"
+                        |"SyncCompleted" =>{
+                            let _ = handle.emit(
+                                event.event_type(),
+                                serde_json::json!({
+                                    "aggregateId": event.aggregate_id(),
+                                    "eventType": event.event_type()
+                                })
+                            );
+                        }
+                        _ =>{}
+                    }
+                }
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             greet,
             discover_devices,
@@ -457,7 +601,8 @@ pub fn run() {
             get_sync_status,
             get_conflicts,
             resolve_conflict,
-            trigger_sync
+            trigger_sync,
+            list_shares
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

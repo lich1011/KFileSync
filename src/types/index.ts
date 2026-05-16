@@ -48,7 +48,7 @@ export interface PairedDevice{
 }
 
 export interface SyncStatus{
-  sharedId: string
+  shareId: string
   totalFiles: number
   conflicts: number
 }

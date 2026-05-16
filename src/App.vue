@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import DeviceList from './components/DeviceList.vue'
 import AppSidebar from './components/layout/AppSidebar.vue';
 import ToastContainer from './components/common/ToastContainer.vue';
 </script>
@@ -10,6 +9,7 @@ import ToastContainer from './components/common/ToastContainer.vue';
     <main class = "app-main">
       <router-view />
     </main>
+    <ToastContainer />
   </div>
 </template>
 

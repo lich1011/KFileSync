@@ -29,17 +29,29 @@ impl SqliteFileIndexRepository {
         };
 
         let version_str: String = row.get("version_vector")?;
-        let version: VersionVector = serde_json::from_str(&version_str).unwrap_or_else( |e|{
-            eprint!("SqliteFileIndex WARNING: Corrupt version_vector JSON, using empty:{}", e);
-            VersionVector::default()
-        });
+        let version: VersionVector = serde_json::from_str(&version_str).map_err( |e|{
+            rusqlite::Error::FromSqlConversionFailure(
+                0, 
+                rusqlite::types::Type::Text, 
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Corrupt version_vector JSON:{}",e)
+                ))
+            )
+        })?;
 
         let blocks_str: Option<String> = row.get("blocks")?;
         let blocks = if let Some(s) = blocks_str {
-            serde_json::from_str(&s).unwrap_or_else(|e|{
-                eprint!("SqliteFileIndex WARNING: Corrupt blocks JSON, using empty:{}", e);
-                BlockList::default()
-            })
+            serde_json::from_str(&s).map_err(|e|{
+                rusqlite::Error::FromSqlConversionFailure(
+                    0, 
+                    rusqlite::types::Type::Text, 
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Corrupt blocks JSON:{}",e)
+                    ))
+                )
+            })?
         } else {
             BlockList::default()
         };
@@ -240,7 +252,6 @@ impl FileIndexRepository for SqliteFileIndexRepository {
 
     async fn save_conflict(&self, conflict: &SyncConflict) -> Result<(), DomainError> {
         let pool = self.pool.clone();
-        let conflict_id= conflict.conflict_id.clone();
         let conflict_path = conflict.path.clone();
         let local_json = serde_json::to_string(&conflict.local).map_err(db_err)?;
         let remote_json = serde_json::to_string(&conflict.remote).map_err(db_err)?;

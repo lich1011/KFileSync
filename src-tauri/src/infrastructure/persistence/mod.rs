@@ -149,27 +149,27 @@ pub fn init_database(db_path: &str) -> Result<Dbpool, String> {
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS pairing_requests (
-            id   TEXT PRIMARY KEY,
-            device_id      TEXT NOT NULL,
-            alias     TEXT,
-            pin_code   TEXT NOT NULL,
-            status  TEXT NOT NULL DEFAULT 'pending',
-            created_at    INTEGER NOT NULL,
-            espires_at    INTEGER NOT NULL,
-            attempts   INTEGER NOT NULL DEFAULT 0
+            id          TEXT PRIMARY KEY,
+            device_id   TEXT NOT NULL,
+            alias       TEXT,
+            pin_code    TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'pending',
+            created_at  INTEGER NOT NULL,
+            expires_at  INTEGER NOT NULL,
+            attempts    INTEGER NOT NULL DEFAULT 0
         )",
         [],
     )
     .map_err(|e| format!("Failed to create pairing_requests table: {}", e))?;
 
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS config (
-            key TEXT PRIMARY KEY,
+        "CREATE TABLE IF NOT EXISTS config (
+            key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
         )",
         [],
     )
-    .map_err(|e| format!("Failed to create tombstone index: {}", e))?;
+    .map_err(|e| format!("Failed to create config table: {}", e))?;
 
     Ok(pool)
 }

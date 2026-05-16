@@ -3,6 +3,7 @@ use crate::domain::port::discovery::DiscoveredDevice;
 use crate::domain::model::device::DeviceId;
 use crate::domain::error::DomainError;
 use async_trait::async_trait;
+use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 use std::net::IpAddr;
 
@@ -58,13 +59,21 @@ impl DiscoveryStrategy for HttpScanStrategy {
             .build()
             .map_err(|e| DomainError::Network(e.to_string()))?;
 
+        // throttle parallel probes so we don't spawn 254 sockets at once.
+        let sem = Arc::new(tokio::sync::Semaphore::new(32));
+
         tokio::spawn(async move {
             let mut handles = Vec::new();
             for ip in ips {
                 let client = client.clone();
                 let tx = tx.clone();
-                // 为每个 IP 并行发起请求
+                let sem =sem.clone();
+                // 为每个 IP 并行发起请求(限流32并发)
                 handles.push(tokio::spawn(async move {
+                    let _permit = match sem.acquire().await{
+                        Ok(p) => p,
+                        Err(_) => return 
+                    };
                     let url = format!("https://{}:{}/api/lansync/v1/info", ip, port);
                     if let Ok(resp) = client.get(&url).send().await {
                         if let Ok(info) = resp.json::<DeviceInfoResponse>().await {
