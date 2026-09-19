@@ -7,8 +7,8 @@ use crate::domain::port::event_bus::{self, EventBus};
 use crate::domain::port::file_index_repo::FileIndexRepository;
 use crate::domain::port::file_watcher::{FileEvent, FileEventType, FileWatcher, WatchHandle};
 use crate::domain::port::share_repo::ShareRepository;
-use crate::domain::service::chunking;
-use crate::domain::service::specification::IgnoreSpec;
+use kfilesync_core::service::chunking;
+use kfilesync_core::service::ignore_spec::IgnoreSpec;
 use crate::infrastructure::security::chunk_hasher::ChunkHasher;
 use std::collections::HashMap;
 use std::path::Path;
@@ -68,7 +68,7 @@ impl IndexerService {
             .watch(Path::new(&share.local_path), tx)
             .await?;
 
-        //Atomic insert:: re-check under lock to prevent TOCTOU race
+        // Atomic insert: re-check under lock to prevent TOCTOU race
         let race_lost = {
             let mut watchers = self.active_watchers.lock().unwrap();
             if watchers.contains_key(share_id) {
@@ -143,7 +143,8 @@ impl IndexerService {
                             .map_err(|e| DomainError::FileSystem(e.to_string()))?;
                         let sha = crate::infrastructure::security::chunk_hasher::ChunkHasher::compute_sha256(&path)?;
                         Ok((meta.len(), sha))
-                    }).await
+                    })
+                    .await
                     .map_err(|e| DomainError::FileSystem(e.to_string()))??;
 
                     let mut e = entry;
@@ -181,18 +182,28 @@ impl IndexerService {
         Ok(())
     }
 
+    /// Builds a `[kfilesync_core::service::ignore_spec::IgnoreSpec]` for
+    /// `share_root`, reading `.syncignore` content from disk if present.
+    /// Passes `is_mobile = false` — desktop only applies `COMMON_DEFAULTS`
+    /// (which includes `.lansync-tmp/`), never `MOBILE_DEFAULTS`.
+    fn build_ignore_spec(share_root: &str, sync_ignore_path: &Path) -> IgnoreSpec {
+        let content = std::fs::read_to_string(sync_ignore_path).ok();
+        IgnoreSpec::build(share_root, content.as_deref(), &[], false)
+            .expect("built-in ignore defaults must be valid gitignore syntax")
+    }
+
     async fn process_events(
         share_id: &ShareId,
         local_device_id: &DeviceId,
         file_index_repo: Arc<dyn FileIndexRepository>,
         rx: &mut Receiver<FileEvent>,
         share_root: &std::path::Path,
-        event_bus: Arc<dyn EventBus>
+        event_bus: Arc<dyn EventBus>,
     ) {
         let sync_ignore_path = share_root.join(".syncignore");
+        let share_root_str = share_root.to_string_lossy().to_string();
 
-        let mut ignore_space = IgnoreSpec::from_file(&sync_ignore_path)
-            .unwrap_or_else(|_| IgnoreSpec::new(share_root, &[]).expect("default ignore space"));
+        let mut ignore_space = Self::build_ignore_spec(&share_root_str, &sync_ignore_path);
 
         while let Some(event) = rx.recv().await {
             // Convert absolute path from notify to share-relative path
@@ -201,15 +212,12 @@ impl IndexerService {
             let path_str = relative_path.to_string_lossy().to_string();
 
             if path_str == ".syncignore" {
-                ignore_space = IgnoreSpec::from_file(&sync_ignore_path).unwrap_or_else(|_| {
-                    IgnoreSpec::new(share_root, &[]).expect("default ignore space")
-                });
+                ignore_space = Self::build_ignore_spec(&share_root_str, &sync_ignore_path);
                 continue;
             }
 
             let is_dir = event.path.is_dir();
-            // let ignore_context = IgnoreContext { path: relative_path, is_dir };
-            if ignore_space.is_ignored(relative_path, is_dir) {
+            if ignore_space.is_ignored(&path_str, is_dir) {
                 continue;
             }
 
@@ -231,7 +239,7 @@ impl IndexerService {
                         let size = meta.len();
                         let sha256 = ChunkHasher::compute_sha256(&abs_path)?;
                         let chunk_size = chunking::compute_chunk_size(size);
-                        let blocks = ChunkHasher::hash_file_chunks(&abs_path, chunk_size, )?;
+                        let blocks = ChunkHasher::hash_file_chunks(&abs_path, chunk_size)?;
                         Ok((size, sha256, blocks))
                     }).await.unwrap_or_else(|e| Err(DomainError::FileSystem(e.to_string())));
 
@@ -255,7 +263,7 @@ impl IndexerService {
                                 e.blocks = blocks;
                                 e.modified_at = event.timestamp;
                                 e.modified_by = device_id.clone();
-                                e.version = e.version.increment(&device_id);
+                                e.version = e.version.increment(&device_id.0);
                                 e
                             } else {
                                 let mut new_entry = FileEntry::new(

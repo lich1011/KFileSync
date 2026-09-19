@@ -1,5 +1,3 @@
-use std::path::Path;
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
 // use crate::domain::model::device::{Device, DeviceState};
 // use crate::domain::model::share::{Share, SyncMode};
 
@@ -102,67 +100,67 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 // Ignore Specification (.syncignore)
 // ---------------------------------------------------------
 
-pub struct IgnoreSpec {
-    gitignore: Gitignore,
-}
+// pub struct IgnoreSpec {
+//     gitignore: Gitignore,
+// }
 
-impl IgnoreSpec {
-    pub fn new(base_dir: &Path, additional_rules: &[&str]) -> Result<Self, ignore::Error> {
-        let mut builder = GitignoreBuilder::new(base_dir);
+// impl IgnoreSpec {
+//     pub fn new(base_dir: &Path, additional_rules: &[&str]) -> Result<Self, ignore::Error> {
+//         let mut builder = GitignoreBuilder::new(base_dir);
         
-        // Add built-in default ignore rules
-        let defaults = [
-            ".DS_Store",
-            "Thumbs.db",
-            "desktop.ini",
-            "$RECYCLE.BIN",
-            ".lansync-tmp/",
-        ];
+//         // Add built-in default ignore rules
+//         let defaults = [
+//             ".DS_Store",
+//             "Thumbs.db",
+//             "desktop.ini",
+//             "$RECYCLE.BIN",
+//             ".lansync-tmp/",
+//         ];
         
-        for rule in defaults {
-            builder.add_line(None, rule)?;
-        }
+//         for rule in defaults {
+//             builder.add_line(None, rule)?;
+//         }
         
-        for rule in additional_rules {
-            builder.add_line(None, rule)?;
-        }
+//         for rule in additional_rules {
+//             builder.add_line(None, rule)?;
+//         }
         
-        let gitignore = builder.build()?;
-        Ok(Self { gitignore })
-    }
+//         let gitignore = builder.build()?;
+//         Ok(Self { gitignore })
+//     }
     
-    pub fn from_file(ignore_file: &Path) -> Result<Self, ignore::Error> {
-        let base_dir = ignore_file.parent().unwrap_or(Path::new(""));
-        let mut builder = GitignoreBuilder::new(base_dir);
+//     pub fn from_file(ignore_file: &Path) -> Result<Self, ignore::Error> {
+//         let base_dir = ignore_file.parent().unwrap_or(Path::new(""));
+//         let mut builder = GitignoreBuilder::new(base_dir);
         
-        // Add built-in defaults
-        let defaults = [
-            ".DS_Store",
-            "Thumbs.db",
-            "desktop.ini",
-            "$RECYCLE.BIN",
-            ".lansync-tmp/",
-        ];
-        for rule in defaults {
-            builder.add_line(None, rule)?;
-        }
+//         // Add built-in defaults
+//         let defaults = [
+//             ".DS_Store",
+//             "Thumbs.db",
+//             "desktop.ini",
+//             "$RECYCLE.BIN",
+//             ".lansync-tmp/",
+//         ];
+//         for rule in defaults {
+//             builder.add_line(None, rule)?;
+//         }
         
-        // Add from file
-        if ignore_file.exists() {
-            let error = builder.add(ignore_file);
-            if let Some(e) = error {
-                return Err(e);
-            }
-        }
+//         // Add from file
+//         if ignore_file.exists() {
+//             let error = builder.add(ignore_file);
+//             if let Some(e) = error {
+//                 return Err(e);
+//             }
+//         }
         
-        let gitignore = builder.build()?;
-        Ok(Self { gitignore })
-    }
+//         let gitignore = builder.build()?;
+//         Ok(Self { gitignore })
+//     }
 
-    pub fn is_ignored(&self, path: &Path, is_dir: bool) -> bool {
-        self.gitignore.matched_path_or_any_parents(path, is_dir).is_ignore()
-    }
-}
+//     pub fn is_ignored(&self, path: &Path, is_dir: bool) -> bool {
+//         self.gitignore.matched_path_or_any_parents(path, is_dir).is_ignore()
+//     }
+// }
 
 // pub struct IgnoreContext<'a> {
 //     pub path: &'a Path,

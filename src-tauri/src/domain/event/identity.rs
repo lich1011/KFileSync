@@ -34,3 +34,20 @@ impl DomainEvent for TrustRevoked {
     fn event_type(&self) -> &str { "TrustRevoked" }
     fn aggregate_id(&self) -> &str { &self.device_id.0 }
 }
+
+/// Sprint 5: raised when this device receives an inbound `POST
+/// /pair/request` (dual-PIN OOB ceremony, ADR-010) — surfaced to the UI so
+/// the local user can be shown `our_pin` to read aloud/compare against the
+/// peer's screen, and prompted for the peer's own PIN.
+#[derive(Debug, Clone)]
+pub struct PairingRequestReceived {
+    pub request_id: String,
+    pub from_device_id: DeviceId,
+    pub from_alias: String,
+    pub our_pin: String,
+}
+
+impl DomainEvent for PairingRequestReceived {
+    fn event_type(&self) -> &str { "PairingRequestReceived" }
+    fn aggregate_id(&self) -> &str { &self.from_device_id.0 }
+}

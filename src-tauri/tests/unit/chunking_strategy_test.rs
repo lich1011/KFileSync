@@ -1,4 +1,4 @@
-use kfilesync_lib::domain::service::chunking::compute_chunk_size;
+use kfilesync_core::service::chunking::compute_chunk_size;
 
 #[test]
 fn test_size_based_chunking() {

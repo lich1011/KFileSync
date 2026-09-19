@@ -24,10 +24,9 @@ pub mod event {
     pub mod sync_events;
 }
 pub mod service {
-    pub mod chunking;
     pub mod specification;
     pub mod policy_enforcer;
-    pub mod conflict_resolver;
+    pub mod conflict_policy;
     pub mod sync_plan_generator;
     // pub mod block_deduplicator;
 }

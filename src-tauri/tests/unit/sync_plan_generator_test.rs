@@ -24,9 +24,9 @@ fn setup_entries() -> (DeviceId, SharePermission, FileEntry, FileEntry) {
 #[test]
 fn test_only_local_has_it() {
     let (local_dev, perm, local, _) = setup_entries();
-    
+
     let plan = SyncPlanGenerator::generate(&[local.clone()], &[], &local_dev, &perm);
-    
+
     assert_eq!(plan.to_push.len(), 1);
     assert_eq!(plan.to_pull.len(), 0);
     assert_eq!(plan.conflicts.len(), 0);
@@ -37,9 +37,9 @@ fn test_only_local_has_it() {
 #[test]
 fn test_only_remote_has_it() {
     let (local_dev, perm, _, remote) = setup_entries();
-    
+
     let plan = SyncPlanGenerator::generate(&[], &[remote.clone()], &local_dev, &perm);
-    
+
     assert_eq!(plan.to_push.len(), 0);
     assert_eq!(plan.to_pull.len(), 1);
     assert_eq!(plan.conflicts.len(), 0);
@@ -50,9 +50,9 @@ fn test_only_remote_has_it() {
 #[test]
 fn test_equal_versions() {
     let (local_dev, perm, local, remote) = setup_entries();
-    
+
     let plan = SyncPlanGenerator::generate(&[local], &[remote], &local_dev, &perm);
-    
+
     assert_eq!(plan.to_push.len(), 0);
     assert_eq!(plan.to_pull.len(), 0);
     assert_eq!(plan.conflicts.len(), 0);
@@ -63,11 +63,11 @@ fn test_equal_versions() {
 #[test]
 fn test_local_newer() {
     let (local_dev, perm, mut local, remote) = setup_entries();
-    
+
     local = local.update_content(100, "hash1".to_string(), BlockList::default(), &local_dev);
-    
+
     let plan = SyncPlanGenerator::generate(&[local], &[remote], &local_dev, &perm);
-    
+
     assert_eq!(plan.to_push.len(), 1);
     assert_eq!(plan.to_pull.len(), 0);
     assert_eq!(plan.conflicts.len(), 0);
@@ -76,12 +76,12 @@ fn test_local_newer() {
 #[test]
 fn test_remote_newer() {
     let (local_dev, perm, local, mut remote) = setup_entries();
-    
+
     let remote_dev = DeviceId("remote_dev".to_string());
     remote = remote.update_content(100, "hash1".to_string(), BlockList::default(), &remote_dev);
-    
+
     let plan = SyncPlanGenerator::generate(&[local], &[remote], &local_dev, &perm);
-    
+
     assert_eq!(plan.to_push.len(), 0);
     assert_eq!(plan.to_pull.len(), 1);
     assert_eq!(plan.conflicts.len(), 0);
@@ -90,18 +90,18 @@ fn test_remote_newer() {
 #[test]
 fn test_conflict() {
     let (local_dev, perm, mut local, mut remote) = setup_entries();
-    
+
     let remote_dev = DeviceId("remote_dev".to_string());
-    
+
     local = local.update_content(100, "hashL".to_string(), BlockList::default(), &local_dev);
     remote = remote.update_content(200, "hashR".to_string(), BlockList::default(), &remote_dev);
-    
+
     let plan = SyncPlanGenerator::generate(&[local], &[remote], &local_dev, &perm);
-    
+
     assert_eq!(plan.to_push.len(), 0);
     assert_eq!(plan.to_pull.len(), 0);
     assert_eq!(plan.conflicts.len(), 1);
-    
+
     // Check resolution is determined (will likely be KeepBoth)
     match plan.conflicts[0].resolution {
         ConflictResolution::KeepBoth { .. } => {}, // Expected
@@ -112,15 +112,15 @@ fn test_conflict() {
 #[test]
 fn test_permissions() {
     let (local_dev, _, local, remote) = setup_entries();
-    
+
     let remote_dev = DeviceId("remote_dev".to_string());
-    
+
     // ReadOnly: cannot push
     let perm_ro = SharePermission::ReadOnly;
     let local_newer = local.clone().update_content(100, "hashL".to_string(), BlockList::default(), &local_dev);
     let plan_ro = SyncPlanGenerator::generate(&[local_newer.clone()], &[remote.clone()], &local_dev, &perm_ro);
     assert_eq!(plan_ro.to_push.len(), 0); // PUSH BLOCKED
-    
+
     // SendOnly: cannot pull
     let perm_so = SharePermission::SendOnly;
     let remote_newer = remote.clone().update_content(200, "hashR".to_string(), BlockList::default(), &remote_dev);
@@ -129,19 +129,22 @@ fn test_permissions() {
 }
 
 #[test]
-fn test_tombstone_not_resurrected() {
+fn test_tombstone_propagation_regression() {
+    // Sprint 3 desktop upgrade / ADR-009: a tombstone present on only one
+    // side must still be pushed/pulled, so the other side learns to
+    // delete. The desktop's previous behavior (filtering `deleted` here)
+    // was the exact bug CROSS_VALIDATION_DESKTOP_MOBILE.md §3.3 flagged —
+    // it caused deleted files to reappear after every sync.
     let (local_dev, perm, local, _) = setup_entries();
-    
-    // Local has a deleted (tombstoned) file. Remote doesn't have it at all.
-    // The file should NOT be pushed to remote — it's dead.
+
     let tombstone = local.mark_deleted(&local_dev);
     let plan = SyncPlanGenerator::generate(&[tombstone], &[], &local_dev, &perm);
-    assert_eq!(plan.to_push.len(), 0, "Tombstoned local file should not be pushed");
-    
-    // Remote has a deleted file. Local doesn't have it at all.
-    // The file should NOT be pulled to local — it's dead.
+    assert_eq!(plan.to_push.len(), 1, "Tombstoned local file must still be pushed");
+    assert!(plan.to_push[0].entry.deleted);
+
     let (_, _, _, remote) = setup_entries();
     let remote_tombstone = remote.mark_deleted(&DeviceId("remote_dev".to_string()));
     let plan2 = SyncPlanGenerator::generate(&[], &[remote_tombstone], &local_dev, &perm);
-    assert_eq!(plan2.to_pull.len(), 0, "Tombstoned remote file should not be pulled");
+    assert_eq!(plan2.to_pull.len(), 1, "Tombstoned remote file must still be pulled");
+    assert!(plan2.to_pull[0].entry.deleted);
 }

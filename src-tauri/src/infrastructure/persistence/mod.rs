@@ -3,6 +3,8 @@ pub mod sqlite_file_index_repo;
 pub mod sqlite_share_repo;
 pub mod sqlite_transfer_repo;
 
+use rusqlite::OptionalExtension;
+
 pub type Dbpool = r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>;
 
 pub fn init_database(db_path: &str) -> Result<Dbpool, String> {
@@ -61,9 +63,9 @@ pub fn init_database(db_path: &str) -> Result<Dbpool, String> {
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS transfer_items (
-            job_id  TEXT NOT NULL,
-            file_id TEXT NOT NULL,
-            item_json TEXT NOT NULL,
+            job_id      TEXT NOT NULL,
+            file_id     TEXT NOT NULL,
+            item_json   TEXT NOT NULL,
             PRIMARY KEY (job_id, file_id),
             FOREIGN KEY (job_id) REFERENCES transfer_jobs(job_id) ON DELETE CASCADE
         )",
@@ -79,13 +81,13 @@ pub fn init_database(db_path: &str) -> Result<Dbpool, String> {
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS shares (
-            share_id    TEXT PRIMARY KEY,
-            share_name  TEXT NOT NULL,
-            local_path  TEXT NOT NULL,
-            sync_mode   TEXT NOT NULL DEFAULT 'two_way',
-            status      TEXT NOT NULL DEFAULT 'active',
-            created_by  TEXT NOT NULL,
-            created_at  INTEGER NOT NULL
+            share_id        TEXT PRIMARY KEY,
+            share_name      TEXT NOT NULL,
+            local_path      TEXT NOT NULL,
+            sync_mode       TEXT NOT NULL DEFAULT 'two_way',
+            status          TEXT NOT NULL DEFAULT 'active',
+            created_by      TEXT NOT NULL,
+            created_at      INTEGER NOT NULL
         )",
         [],
     )
@@ -93,11 +95,11 @@ pub fn init_database(db_path: &str) -> Result<Dbpool, String> {
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS share_members (
-            share_id      TEXT NOT NULL,
-            device_id     TEXT NOT NULL,
-            permission    TEXT NOT NULL DEFAULT 'read_write',
-            authorized_by TEXT NOT NULL,
-            authorized_at INTEGER NOT NULL,
+            share_id        TEXT NOT NULL,
+            device_id       TEXT NOT NULL,
+            permission      TEXT NOT NULL DEFAULT 'read_write',
+            authorized_by   TEXT NOT NULL,
+            authorized_at   INTEGER NOT NULL,
             PRIMARY KEY (share_id, device_id),
             FOREIGN KEY (share_id) REFERENCES shares(share_id) ON DELETE CASCADE
         )",
@@ -107,18 +109,18 @@ pub fn init_database(db_path: &str) -> Result<Dbpool, String> {
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS file_entries (
-            share_id      TEXT NOT NULL,
-            path          TEXT NOT NULL,
-            entry_type    TEXT NOT NULL DEFAULT 'file',
-            size          INTEGER NOT NULL DEFAULT 0,
-            modified_at   INTEGER,
-            modified_by   TEXT,
-            version_vector TEXT NOT NULL DEFAULT '{}',
-            sha256        TEXT,
-            blocks        TEXT,
-            deleted       INTEGER NOT NULL DEFAULT 0,
-            deleted_at    INTEGER,
-            updated_at    INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+            share_id        TEXT NOT NULL,
+            path            TEXT NOT NULL,
+            entry_type      TEXT NOT NULL DEFAULT 'file',
+            size            INTEGER NOT NULL DEFAULT 0,
+            modified_at     INTEGER,
+            modified_by     TEXT,
+            version_vector  TEXT NOT NULL DEFAULT '{}',
+            sha256          TEXT,
+            blocks          TEXT,
+            deleted         INTEGER NOT NULL DEFAULT 0,
+            deleted_at      INTEGER,
+            updated_at      INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
             PRIMARY KEY (share_id, path)
         )",
         [],
@@ -127,14 +129,14 @@ pub fn init_database(db_path: &str) -> Result<Dbpool, String> {
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS sync_conflicts (
-            conflict_id   TEXT PRIMARY KEY,
-            share_id      TEXT NOT NULL,
-            file_path     TEXT NOT NULL,
-            local_entry   TEXT NOT NULL,
-            remote_entry  TEXT NOT NULL,
-            resolution    TEXT DEFAULT 'pending',
-            created_at    INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-            resolved_at   INTEGER
+            conflict_id     TEXT PRIMARY KEY,
+            share_id        TEXT NOT NULL,
+            file_path       TEXT NOT NULL,
+            local_entry     TEXT NOT NULL,
+            remote_entry    TEXT NOT NULL,
+            resolution      TEXT DEFAULT 'pending',
+            created_at      INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+            resolved_at     INTEGER
         )",
         [],
     )
@@ -142,7 +144,7 @@ pub fn init_database(db_path: &str) -> Result<Dbpool, String> {
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_file_entries_tombstone \
-         ON file_entries(deleted, deleted_at) WHERE deleted = 1",
+        ON file_entries(deleted, deleted_at) WHERE deleted = 1",
         [],
     )
     .map_err(|e| format!("Failed to create tombstone index: {}", e))?;
@@ -164,12 +166,51 @@ pub fn init_database(db_path: &str) -> Result<Dbpool, String> {
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS config (
-            key   TEXT PRIMARY KEY,
-            value TEXT NOT NULL
+            key     TEXT PRIMARY KEY,
+            value   TEXT NOT NULL
         )",
         [],
     )
     .map_err(|e| format!("Failed to create config table: {}", e))?;
 
+    migrate_file_entries_timestamps_to_millis(&conn)
+        .map_err(|e| format!("Failed to migrate file_entries timestamps: {}", e))?;
+
     Ok(pool)
+}
+
+/// Sprint 2 desktop upgrade: `kfilesync-core` treats all timestamps as
+/// milliseconds (ADR-0006), but `file_entries.modified_at`/`deleted_at` were
+/// stored in seconds prior to this migration. Bumps `schema_version` (stored
+/// in `config`) to `"2"` once done, so this only ever runs once per database.
+fn migrate_file_entries_timestamps_to_millis(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let schema_version: Option<String> = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    if schema_version.as_deref() == Some("2") {
+        return Ok(());
+    }
+
+    conn.execute(
+        "UPDATE file_entries SET modified_at = modified_at * 1000 WHERE modified_at IS NOT NULL",
+        [],
+    )?;
+
+    conn.execute(
+        "UPDATE file_entries SET deleted_at = deleted_at * 1000 WHERE deleted_at IS NOT NULL",
+        [],
+    )?;
+
+    conn.execute(
+        "INSERT INTO config (key, value) VALUES ('schema_version', '2')
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [],
+    )?;
+
+    Ok(())
 }

@@ -188,10 +188,22 @@ impl TransferAppService {
                 sha256: item.sha256.clone(),
                 chunk_count: item.chunk_manifest.chunks.len() as u32,
                 chunk_size: item.chunk_manifest.chunk_size,
+                chunk_hashes: item.chunk_manifest.chunks.iter().map(|c| c.hash.clone()).collect(),
             }).collect(),
         };
 
-        let resp = self.network_client.request_transfer(&address, crate::DEFAULT_PORT, req).await?;
+        let resp = match self.network_client.request_transfer(&address, crate::DEFAULT_PORT, req).await {
+            Ok(resp) => resp,
+            Err(e) =>{
+                let failed = job.clone().fail(TransferError::ConnectionLost)?;
+                self.transfer_repo.save(failed.clone()).await:;
+                self.event_bus.publish(Box::new(TransferFailed{
+                    job_id: failed.job_id.clone(),
+                    error: TransferError::ConnectionLost,
+                }));
+                return Err(e);
+            }
+        };
         if resp.status != "accepted" {
             let failed = job.clone().fail(TransferError::PeerRejected)?;
             self.transfer_repo.save(failed.clone()).await?;
@@ -209,18 +221,18 @@ impl TransferAppService {
         };
         self.transfer_repo.save(current_job.clone()).await?;
 
-        // Map of file_id -> chunks already on peer (for resume)
-        let skip_map: std::collections::HashMap<String, u32> = resp.skip_chunks.iter()
-            .map(|c| (c.file_id.clone(), c.chunks_already_done))
+        // Map of file_id -> chunks indices already on peer (for resume)
+        let skip_map: std::collections::HashMap<String, std::collections::HashSet<u32>> = resp.skip_chunks.iter()
+            .map(|c| (c.file_id.clone(), c.chunk_indices.iter().cloned().collect()))
             .collect();
 
         let item_snapshot = current_job.items.clone();
         let mut total_bytes: u64 = 0;
 
         for item in &item_snapshot {
-            let already = *skip_map.get(&item.file_id.0).unwrap_or(&item.chunks_done);
+            let skip_set = skip_map.get(&item.file_id.0);
             for chunk in &item.chunk_manifest.chunks {
-                if chunk.index < already {
+                if chunk.index < item.chunks_done || skip_set.is_some_and(|s| s.contains(&chunk.index)) {
                     continue;
                 }
 
@@ -240,6 +252,7 @@ impl TransferAppService {
                     &current_job.job_id.0,
                     &item.file_id.0,
                     chunk.index,
+                    &chunk.hash,
                     data,
                 ).await {
                     let failed = current_job.clone().fail(TransferError::ConnectionLost)?;
@@ -334,7 +347,7 @@ impl TransferAppService {
                     )
                     .await?;
 
-                if !chunk.hash.is_empty() && !ChunkHasher::verify_chunk(&data, &chunk.hash) {
+                if !chunk.hash.is_empty() && !kfilesync_core::crypto::chunk_hasher::verify_chunk(&data, &chunk.hash) {
                     let failed = current_job.fail(TransferError::VerificationFailed)?;
                     self.transfer_repo.save(failed.clone()).await?;
                     self.event_bus.publish(Box::new(TransferFailed {

@@ -1,12 +1,9 @@
 use std::sync::Arc;
 
-use axum::extract::path;
-use reqwest::redirect::Action;
-
 use crate::domain::error::DomainError;
 use crate::domain::model::device::DeviceId;
 use crate::domain::model::file_entry::{
-    ConflictResolution, FileEntry, SyncAction, SyncPlan, VersionVector,
+    BlockInfo, BlockList, ConflictResolution, EntryType, FileEntry, SyncAction, SyncPlan, VersionVector,
 };
 use crate::domain::model::share::{ShareId, SharePermission};
 use crate::domain::model::transfer::{TransferJob, TransferType, FileRequest};
@@ -16,12 +13,50 @@ use crate::domain::port::repository::DeviceRepository;
 use crate::domain::port::share_repo::ShareRepository;
 use crate::domain::port::file_index_repo::FileIndexRepository;
 use crate::domain::port::transfer_repo::TransferRepository;
-use crate::domain::service::policy_enforcer::{PolicyEnforcer,SyncDirection};
+use crate::domain::service::policy_enforcer::{PolicyEnforcer, SyncDirection};
 // use crate::domain::service::specification::SyncDirection;
 use crate::domain::service::sync_plan_generator::SyncPlanGenerator;
 use crate::domain::event::sync_events::{SyncCompleted, ConflictDetected};
-use crate::infrastructure::network::dto::SyncIndexResponseDto;
+use kfilesync_core::protocol::dto as core_dto;
 // use crate::application::sync_flow::SyncFlowTemplate;
+
+/// Sprint 4: inverse of `http_server::entry_to_dto` — converts a wire
+/// `FileEntryDto` (from a remote peer's `/sync/index` response) back into
+/// desktop's domain `FileEntry`.
+fn dto_to_entry(dto: &core_dto::FileEntryDto) -> FileEntry {
+    // `VersionVector` is `#[serde(transparent)]` over a `BTreeMap<String,
+    // u64>` in core with no public map constructor, so we go through serde
+    // to rebuild it from the wire's `version_vector` field.
+    let version: VersionVector = serde_json::to_value(&dto.version_vector)
+        .and_then(serde_json::from_value)
+        .unwrap_or_default();
+
+    FileEntry {
+        share_id: ShareId(dto.share_id.clone()),
+        path: dto.path.clone(),
+        entry_type: match dto.entry_type.as_str() {
+            "directory" => EntryType::Directory,
+            _ => EntryType::File,
+        },
+        size: dto.size,
+        modified_at: dto.modified_at_ms as u64,
+        modified_by: DeviceId(dto.modified_by.clone()),
+        version,
+        sha256: dto.sha256.clone(),
+        blocks: BlockList(
+            dto.blocks
+                .iter()
+                .map(|b| BlockInfo {
+                    index: b.index,
+                    size: b.size,
+                    hash: b.hash.clone(),
+                })
+                .collect(),
+        ),
+        deleted: dto.deleted,
+        deleted_at: dto.deleted_at_ms.map(|v| v as u64),
+    }
+}
 
 pub struct HttpSyncFlow {
     local_device_id: DeviceId,
@@ -65,14 +100,13 @@ impl HttpSyncFlow {
     //     }).collect()
     // }
 
-    pub async fn execute (&self, share_id: &ShareId, peer: &DeviceId) -> Result<SyncPlan, DomainError>{
+    pub async fn execute(&self, share_id: &ShareId, peer: &DeviceId) -> Result<SyncPlan, DomainError> {
         self.verify_permission(share_id, peer).await?;
-        let remote_index =self.fetch_remote_index(share_id, peer).await?;
+        let remote_index = self.fetch_remote_index(share_id, peer).await?;
         let plan = self.generate_plan(share_id, peer, &remote_index).await?;
         self.execute_plan(&plan, peer).await?;
         self.update_versions(share_id, &plan).await?;
         Ok(plan)
-
     }
 // }
 
@@ -83,7 +117,7 @@ impl HttpSyncFlow {
         //     .ok_or_else(|| DomainError::ShareNotFound(share_id.0.clone()))?;
 
         // if !share.members.iter().any(|m| m.device_id == *peer) {
-        //     return Err(DomainError::PermissionDenied("Peer is not a member of this share".into()));
+        //     return Err(DomainError::PermissionDenied("Peer is not a member of this share.".into()));
         // }
         // Ok(())
         self.policy_enforcer.check_sync(peer, share_id, SyncDirection::Pull).await
@@ -100,10 +134,10 @@ impl HttpSyncFlow {
 
         let json_str = self.network_client.fetch_remote_index(&address, crate::DEFAULT_PORT, &share_id.0).await?;
 
-        let res: SyncIndexResponseDto = serde_json::from_str(&json_str)
+        let res: core_dto::IndexResponseDto = serde_json::from_str(&json_str)
             .map_err(|e| DomainError::Network(format!("Failed to parse remote index: {}", e)))?;
 
-        Ok(res.entries)
+        Ok(res.entries.iter().map(dto_to_entry).collect())
     }
 
     async fn generate_plan(&self, share_id: &ShareId, peer: &DeviceId, remote_index: &[FileEntry]) -> Result<SyncPlan, DomainError> {
@@ -130,37 +164,36 @@ impl HttpSyncFlow {
         Ok(plan)
     }
 
-    fn validate_relative_path(p: &str) -> Result<(),DomainError>{
-        let path=std::path::Path::new(p);
-        if path.is_absolute(){
-            return Err(DomainError::PermissionDenied(format!("absolute path not allow: {}",p)));   
+    fn validate_relative_path(p: &str) -> Result<(), DomainError> {
+        let path = std::path::Path::new(p);
+        if path.is_absolute() {
+            return Err(DomainError::PermissionDenied(format!("absolute path not allow: {}", p)));
         }
 
-        for comp in path.components(){
+        for comp in path.components() {
             match comp {
-                std::path::Component::ParentDir =>{
-                    return Err(DomainError::PermissionDenied(format!("path traversal denied: {}",p)));
+                std::path::Component::ParentDir => {
+                    return Err(DomainError::PermissionDenied(format!("path traversal denied: {}", p)));
                 }
-                std::path::Component::Prefix(_) | std::path::Component::RootDir =>{
-                    return Err(DomainError::PermissionDenied(format!("absolute/root path denied: {}",p)));
+                std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                    return Err(DomainError::PermissionDenied(format!("absolute/root path denied: {}", p)));
                 }
-                _ =>{}
+                _ => {}
             }
         }
-
         Ok(())
     }
 
     async fn execute_plan(&self, plan: &SyncPlan, peer: &DeviceId) -> Result<(), DomainError> {
         // validate every path the remote peer is asking us to read or write.
-        for action in plan.to_pull.iter().chain(plan.to_push.iter()){
-            Self::validate_relative_path(&action.path);
+        for action in plan.to_pull.iter().chain(plan.to_push.iter()) {
+            Self::validate_relative_path(&action.path)?;
         }
 
-        for conflict in &plan.conflicts{
-            Self::validate_relative_path(&conflict.path);
-            if let ConflictResolution::KeepBoth { conflict_copy_path } = &conflict.resolution{
-                Self::validate_relative_path(conflict_copy_path);
+        for conflict in &plan.conflicts {
+            Self::validate_relative_path(&conflict.path)?;
+            if let ConflictResolution::KeepBoth { conflict_copy_path } = &conflict.resolution {
+                Self::validate_relative_path(conflict_copy_path)?;
             }
         }
 
@@ -179,7 +212,7 @@ impl HttpSyncFlow {
             let mut job = TransferJob::create_from_files(
                 TransferType::SyncPull,
                 peer.clone(),
-                pull_files
+                pull_files,
                 // self.chunking_strategy.as_ref(),
             );
             job.share_id = plan.to_pull.first().map(|a| a.entry.share_id.0.clone());
@@ -256,8 +289,8 @@ impl HttpSyncFlow {
     async fn update_versions(&self, share_id: &ShareId, plan: &SyncPlan) -> Result<(), DomainError> {
         // Merge remote version vectors into local index entries for successfully resolved items
         for action in &plan.to_pull {
-            //let local_entry: Option<FileEntry> = self.file_index_repo.find_by_path(share_id, &action.path).await?;
-            let local_entry= self.file_index_repo.find_by_path(share_id, &action.path).await?;
+            // let local_entry: Option<FileEntry> = self.file_index_repo.find_by_path(share_id, &action.path).await?;
+            let local_entry = self.file_index_repo.find_by_path(share_id, &action.path).await?;
             let updated = match local_entry {
                 Some(entry) => entry.apply_remote_version(&action.entry),
                 None => action.entry.clone(),
@@ -266,8 +299,8 @@ impl HttpSyncFlow {
         }
 
         for action in &plan.to_push {
-            //let local_entry: Option<FileEntry> = self.file_index_repo.find_by_path(share_id, &action.path).await?;
-            let local_entry= self.file_index_repo.find_by_path(share_id, &action.path).await?;
+            // let local_entry: Option<FileEntry> = self.file_index_repo.find_by_path(share_id, &action.path).await?;
+            let local_entry = self.file_index_repo.find_by_path(share_id, &action.path).await?;
             if let Some(entry) = local_entry {
                 let updated = entry.apply_remote_version(&action.entry);
                 self.file_index_repo.save(&updated).await?;
@@ -276,8 +309,8 @@ impl HttpSyncFlow {
 
         for conflict in &plan.conflicts {
             let merged_version: VersionVector = conflict.local.version.merge(&conflict.remote.version);
-            //let local_entry: Option<FileEntry> = self.file_index_repo.find_by_path(share_id, &conflict.path).await?;
-            let local_entry= self.file_index_repo.find_by_path(share_id, &conflict.path).await?;
+            // let local_entry: Option<FileEntry> = self.file_index_repo.find_by_path(share_id, &conflict.path).await?;
+            let local_entry = self.file_index_repo.find_by_path(share_id, &conflict.path).await?;
             if let Some(mut entry) = local_entry {
                 entry.version = merged_version;
                 self.file_index_repo.save(&entry).await?;
@@ -285,7 +318,6 @@ impl HttpSyncFlow {
         }
         Ok(())
     }
-
 
     async fn emit_events(&self, plan: &SyncPlan) -> Result<(), DomainError> {
         let files_synced: u32 = (plan.to_pull.len() + plan.to_push.len()) as u32;
@@ -314,9 +346,9 @@ impl HttpSyncFlow {
 
     fn make_file_requests(actions: &[SyncAction]) -> Vec<FileRequest> {
         actions.iter().map(|action| FileRequest {
-            file_path:action.entry.path.clone(),
-            file_size:action.entry.size,
-            sha256:action.entry.sha256.clone().unwrap_or_default()
+            file_path: action.entry.path.clone(),
+            file_size: action.entry.size,
+            sha256: action.entry.sha256.clone().unwrap_or_default(),
         }).collect()
     }
 }

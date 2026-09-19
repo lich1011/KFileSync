@@ -16,7 +16,7 @@ const store = useDeviceStore()
       :device-id="store.pairingDeviceId"
       :pin="store.pairingPin ?? ''"
       @close="store.closePairingDialog()"
-      @confirm="(pin, cert) => store.confirmPairing(pin, cert)"
+      @confirm="(peerPin) => store.confirmPairing(peerPin)"
       @reject="store.rejectPairing()"
     />
   </div>

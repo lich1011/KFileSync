@@ -43,19 +43,16 @@ pub async fn discover_devices(state: State<'_, AppState>) -> Result<Vec<Discover
 
 #[tauri::command]
 pub async fn request_pairing(target_id: String, state: State<'_, AppState>) -> Result<String, String> {
-    let session = state.identity_service.initiate_pairing(&DeviceId(target_id)).await.map_err(|e| e.to_string())?;
-    // Return the session id and pin code to the UI; UI must pass session_id back on confirm
-    Ok(session.pin_code)
+    state.identity_service.initiate_pairing(&DeviceId(target_id)).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn confirm_pairing(
     target_id: String,
-    pin_code: String,
-    cert_pem: String,
+    peer_pin: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    state.identity_service.confirm_pairing(&DeviceId(target_id), &pin_code, cert_pem).await.map_err(|e| e.to_string())
+    state.identity_service.confirm_pairing(&DeviceId(target_id), &peer_pin).await.map_err(|e| e.to_string())
 }
 
 #[derive(Deserialize)]

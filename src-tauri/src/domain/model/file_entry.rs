@@ -1,49 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use crate::domain::model::device::DeviceId;
 use crate::domain::model::share::ShareId;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Clone, Eq, PartialEq, Hash, Debug, Default, Serialize, Deserialize)]
-pub struct VersionVector(pub BTreeMap<DeviceId, u64>);
-
-impl VersionVector {
-    pub fn new() -> Self {
-        VersionVector(BTreeMap::new())
-    }
-
-    pub fn is_ancestor_of(&self, other: &Self) -> bool {
-        for (device_id, &self_version) in &self.0 {
-            let other_version = other.0.get(device_id).copied().unwrap_or(0);
-            if self_version > other_version {
-                return false;
-            }
-        }
-        true
-    }
-    
-    pub fn conflicts_with(&self, other: &Self) -> bool {
-        !self.is_ancestor_of(other) && !other.is_ancestor_of(self)
-    }
-    
-    pub fn increment(&self, device: &DeviceId) -> Self {
-        let mut new_vec = self.0.clone();
-        let count = new_vec.entry(device.clone()).or_insert(0);
-        *count += 1;
-        VersionVector(new_vec)
-    }
-    
-    pub fn merge(&self, other: &Self) -> Self {
-        let mut result = self.0.clone();
-        for (device_id, &other_version) in &other.0 {
-            let self_version = result.entry(device_id.clone()).or_insert(0);
-            if other_version > *self_version {
-                *self_version = other_version;
-            }
-        }
-        VersionVector(result)
-    }
-}
+pub use kfilesync_core::domain::VersionVector;
 
 // ---------------------------------------------------------
 // Sync Domain Models
@@ -72,7 +32,7 @@ pub struct FileEntry {
     pub path: String,                // Relative to share root
     pub entry_type: EntryType,
     pub size: u64,
-    pub modified_at: u64,            // Timestamp
+    pub modified_at: u64,            // Milliseconds since epoch
     pub modified_by: DeviceId,
     pub version: VersionVector,
     pub sha256: Option<String>,
@@ -83,7 +43,7 @@ pub struct FileEntry {
 
 impl FileEntry {
     pub fn new(share_id: ShareId, path: String, entry_type: EntryType, device_id: &DeviceId) -> Self {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
         Self {
             share_id,
             path,
@@ -91,7 +51,7 @@ impl FileEntry {
             size: 0,
             modified_at: now,
             modified_by: device_id.clone(),
-            version: VersionVector::new().increment(device_id),
+            version: VersionVector::new().increment(&device_id.0),
             sha256: None,
             blocks: BlockList(Vec::new()),
             deleted: false,
@@ -104,16 +64,16 @@ impl FileEntry {
         self.sha256 = Some(sha256);
         self.blocks = blocks;
         self.modified_by = device_id.clone();
-        self.modified_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-        self.version = self.version.increment(device_id);
+        self.modified_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        self.version = self.version.increment(&device_id.0);
         self
     }
 
     pub fn mark_deleted(mut self, device_id: &DeviceId) -> Self {
         self.deleted = true;
-        self.deleted_at = Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs());
+        self.deleted_at = Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as u64);
         self.modified_by = device_id.clone();
-        self.version = self.version.increment(device_id);
+        self.version = self.version.increment(&device_id.0);
         self
     }
 

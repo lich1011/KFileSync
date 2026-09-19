@@ -8,35 +8,29 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: []
-  confirm: [pin: string, certPem: string]
+  confirm: [peerPin: string]
   reject: []
 }>()
 
-const inputPin = ref(props.pin)
-const certPem = ref('')
+const peerPin = ref('')
 </script>
 
 <template>
   <div class="overlay" @click.self="emit('close')">
     <div class="dialog">
       <h3>设备配对</h3>
-      <p class="hint">请在对方设备上确认以下配对码：</p>
+      <p class="hint">请相互通知配对码</p>
       <div class="pin-display">{{ pin }}</div>
 
       <label class="field">
-        <span>确认 PIN 码</span>
-        <input v-model="inputPin" placeholder="输入配对码" />
-      </label>
-
-      <label class="field">
-        <span>对方证书 (PEM)</span>
-        <textarea v-model="certPem" rows="3" placeholder="粘贴对方设备证书" />
+        <span>对方配对码</span>
+        <input v-model="peerPin" placeholder="输入配对码" />
       </label>
 
       <div class="actions">
        <button class="ghost" @click="emit('reject')">拒绝</button>
         <button class="ghost" @click="emit('close')">取消</button>
-        <button class="primary" @click="emit('confirm', inputPin, certPem)">确认配对</button>
+        <button class="primary" @click="emit('confirm', peerPin)">确认配对</button>
       </div>
     </div>
   </div>

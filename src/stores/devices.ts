@@ -31,10 +31,10 @@ export const useDeviceStore = defineStore('devices', () => {
     }
   }
 
-  async function confirmPairing(pin: string, certPem: string) {
+  async function confirmPairing(peerPin: string) {
     if (!pairingDeviceId.value) return
     try {
-      await api.confirmPairing(pairingDeviceId.value, pin, certPem)
+      await api.confirmPairing(pairingDeviceId.value, peerPin)
       const device = devices.value.find(d => d.id === pairingDeviceId.value)
       if (device) device.status = 'Paired'
       useNotificationStore().add('success', '配对成功')
@@ -47,32 +47,32 @@ export const useDeviceStore = defineStore('devices', () => {
   }
 
   async function rejectPairing() {
-    if(!pairingDeviceId.value) return
-    try{
+    if (!pairingDeviceId.value) return
+    try {
       await api.rejectPairing(pairingDeviceId.value)
-      useNotificationStore().add('info',"已拒绝配对")
-    }catch(e){
-      useNotificationStore().add('error',"拒绝配对失败")
-    }finally{
+      useNotificationStore().add('info', "已拒绝配对")
+    } catch (e) {
+      useNotificationStore().add('error', "拒绝配对失败")
+    } finally {
       pairingDeviceId.value = null
-      pairingPin.value =null
+      pairingPin.value = null
     }
-  } 
+  }
 
   function closePairingDialog() {
     pairingDeviceId.value = null
     pairingPin.value = null
   }
 
-  return { 
-    devices, 
-    loading, 
-    pairingDeviceId, 
-    pairingPin, 
-    fetchDevices, 
-    requestPairing, 
-    confirmPairing, 
+  return {
+    devices,
+    loading,
+    pairingDeviceId,
+    pairingPin,
+    fetchDevices,
+    requestPairing,
+    confirmPairing,
     rejectPairing,
-    closePairingDialog 
+    closePairingDialog
   }
 })

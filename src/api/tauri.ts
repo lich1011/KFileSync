@@ -10,8 +10,8 @@ export async function requestPairing(targetId: string): Promise<string> {
   return invoke<string>('request_pairing', { targetId })
 }
 
-export async function confirmPairing(targetId: string, pinCode: string, certPem: string): Promise<void> {
-  return invoke('confirm_pairing', { targetId, pinCode, certPem })
+export async function confirmPairing(targetId: string, peerPin: string): Promise<void> {
+  return invoke('confirm_pairing', { targetId, peerPin })
 }
 
 export async function sendFiles(peerId: string, files: FileRequestDto[]): Promise<string> {

@@ -41,48 +41,58 @@ fn test_certificate_pem_validation() {
 
 #[test]
 fn test_pairing_session_verify() {
-    use kfilesync_lib::domain::model::device::DeviceId;
-    use kfilesync_lib::domain::model::pairing::PairingSession;
+    use kfilesync_core::domain::{PairingSession, SecretPin};
+    use kfilesync_core::trust::pairing_state::{verify_peer_pin, PinVerdict};
 
-    let target = DeviceId("device_abc".to_string());
     let pin = "123456".to_string();
-    let expires_at = 9999999999u64;
-    let mut session = PairingSession::new(target, pin.clone(), expires_at);
+    let expires_at = 9999999999i64;
+    let make_session = || PairingSession {
+        request_id: "req1".to_string(),
+        target_device_id: "device_abc".to_string(),
+        our_pin: SecretPin::new(pin.clone()),
+        expected_their_pin: None,
+        expires_at_ms: expires_at,
+        attempts: 0,
+        max_attempts: 3,
+    };
 
-    // Correct pin within time — should pass
-    assert!(session.verify(&pin, 1000000000).is_ok());
+    // Correct pin within time should pass
+    let mut session = make_session();
+    assert!(matches!(verify_peer_pin(&mut session, &pin, 1_000_000_000), PinVerdict::Accepted));
 
-    // Wrong pin — should fail with InvalidPinCode
-    let mut session2 = PairingSession::new(
-        DeviceId("device_abc".to_string()), pin.clone(),expires_at
-    );
-    let err = session2.verify("000000", 1000000000).unwrap_err();
-    assert_eq!(err, DomainError::InvalidPinCode);
+    // Wrong pin should fail with Wrong
+    let mut session2 = make_session();
+    assert!(matches!(verify_peer_pin(&mut session2, "000000", 1_000_000_000), PinVerdict::Wrong));
 
-    // Expired — should fail with SessionExpired
-    let mut session3 = PairingSession::new(
-        DeviceId("device_abc".to_string()), pin.clone(),expires_at
-    );
-    let err = session3.verify(&pin, expires_at + 1).unwrap_err();
-    assert_eq!(err, DomainError::SessionExpired);
+    // Expired should fail with Expired
+    let mut session3 = make_session();
+    assert!(matches!(verify_peer_pin(&mut session3, &pin, expires_at + 1), PinVerdict::Expired));
 }
 
 #[test]
-fn test_pairing_session_max_attempts(){
-    use kfilesync_lib::domain::model::device::DeviceId;
-    use kfilesync_lib::domain::model::pairing::PairingSession;
+fn test_pairing_session_max_attempts() {
+    use kfilesync_core::domain::{PairingSession, SecretPin};
+    use kfilesync_core::trust::pairing_state::{verify_peer_pin, PinVerdict};
 
-    let target = DeviceId("device_xyz".to_string());
     let pin = "654321".to_string();
-    let mut session = PairingSession::new(target, pin.clone(), 9999999999u64);
+    let mut session = PairingSession {
+        request_id: "req2".to_string(),
+        target_device_id: "device_xyz".to_string(),
+        our_pin: SecretPin::new(pin.clone()),
+        expected_their_pin: None,
+        expires_at_ms: 9999999999,
+        attempts: 0,
+        max_attempts: 3,
+    };
 
-    // 3 wrong attempts should exhuast max_attempts
-    assert_eq!(session.verify("111111", 1000000000).unwrap_err(),DomainError::InvalidPinCode);
-    assert_eq!(session.verify("222222", 1000000000).unwrap_err(),DomainError::InvalidPinCode);
-    assert_eq!(session.verify("333333", 1000000000).unwrap_err(),DomainError::InvalidPinCode);
+    // 3 wrong attempts should exhaust max_attempts
+    assert!(matches!(verify_peer_pin(&mut session, "111111", 1_000_000_000), PinVerdict::Wrong));
+    assert!(matches!(verify_peer_pin(&mut session, "222222", 1_000_000_000), PinVerdict::Wrong));
+    assert!(matches!(verify_peer_pin(&mut session, "333333", 1_000_000_000), PinVerdict::Wrong));
 
-    // Even correct PIN should be reject after max attempts
-    let err=session.verify(&pin, 1000000000).unwrap_err();
-    assert!(matches!(err, DomainError::BusinessRuleViolation(_)));
-    
+    // Even correct PIN should be rejected after max attempts
+    assert!(matches!(
+        verify_peer_pin(&mut session, &pin, 1_000_000_000),
+        PinVerdict::MaxAttemptsExceeded
+    ));
 }

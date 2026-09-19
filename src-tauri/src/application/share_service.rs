@@ -96,6 +96,11 @@ impl ShareAppService {
                 SharePermission::ReceiveOnly => "receive_only".to_string(),
             },
             invited_by: self.local_device_id.0.clone(),
+            sync_mode: match share.sync_mode {
+                SyncMode::SendOnly => "send_only".to_string(),
+                SyncMode::ReceiveOnly => "receive_only".to_string(),
+                SyncMode::TwoWay => "two_way".to_string(),
+            },
         };
 
         if let Err(_e) = self.network_client.invite_to_share(&address, crate::DEFAULT_PORT, req).await {

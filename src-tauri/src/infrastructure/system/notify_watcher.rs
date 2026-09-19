@@ -42,7 +42,7 @@ impl FileWatcher for NotifyWatcherAdapter {
                 let timestamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
-                    .as_secs();
+                    .as_millis() as u64;
 
                 // Map notify events to our domain events
                 let event_type = match event.kind {

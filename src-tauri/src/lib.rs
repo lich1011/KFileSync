@@ -153,8 +153,6 @@ pub fn run() {
         Arc::new(ReqwestNetworkClient::new().expect("Failed to init NetworkClient"));
     
     network_client.set_local_device_id(local_device_id.0.clone());
-    network_client.endable_bootstrap();
-
     // 13. Crash Recovery: recover interrupted transfers job
 
     {
@@ -214,14 +212,20 @@ pub fn run() {
     }
 
     // 14. App Services
+
+    let local_cert_pem = String::from_utf8(cert_pem_bytes.clone()).expect("TLS cert PEM is not valid UTF-8");
+    let sessions = Arc::new(domain::model::pairing::PairingSessionStore::new());
+
     let identity_service = Arc::new(DeviceAppService::new(
         local_device_id.clone(),
         local_alias.clone(),
+        local_cert_pem.clone(),
         device_repo.clone(),
         discovery,
         key_store,
         network_client.clone(),
         event_bus.clone(),
+        sessions.clone(),
     ));
 
     let transfer_service = Arc::new(TransferAppService::new(
@@ -503,19 +507,27 @@ pub fn run() {
     };
     let server_device_id = local_device_id.clone();
     let server_alias = local_alias;
+    let server_cert_pem = local_cert_pem;
     let server_device_repo = device_repo.clone();
     let server_file_index_repo = file_index_repo.clone();
     let server_share_repo = share_repo.clone();
     let server_transfer_repo = transfer_repo.clone();
+    let server_network_client = network_client.clone();
+    let server_event_bus = event_bus.clone();
+    let server_sessions = sessions.clone();
     rt.spawn(async move {
         if let Err(e) = start_server(
             server_config,
             server_device_id,
             server_alias,
+            server_cert_pem,
             server_device_repo,
             server_file_index_repo,
             server_share_repo,
             server_transfer_repo,
+            server_network_client,
+            server_event_bus,
+            server_sessions,
         )
         .await
         {

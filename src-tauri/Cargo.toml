@@ -24,6 +24,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.6.1", features = [] }
 
 [dependencies]
+kfilesync-core = { path = "/Users/luokai/Github/KFileSyncCore/kfilesync-core" }
 tauri = { version = "2.11.1", features = [] }
 tauri-plugin-opener = "2.5.4"
 tauri-plugin-dialog = "2.7.1"
