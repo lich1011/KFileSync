@@ -215,7 +215,44 @@ impl ReqwestNetworkClient {
     }
 
     fn format_url(ip: &str, port: u16, path: &str) -> String {
-        format!("https://{}:{}{}", ip, port, path)
+        let trimmed = ip.trim();
+        let trimmed = trimmed
+            .strip_prefix("https://")
+            .or_else(|| trimmed.strip_prefix("http://"))
+            .unwrap_or(trimmed);
+
+        let host_port = trimmed.split('/').next().unwrap_or(trimmed);
+
+        let (host, final_port) = if host_port.starts_with('[') {
+            if let Some(end_bracket) = host_port.find(']') {
+                let host = &host_port[1..end_bracket];
+                let rest = &host_port[end_bracket + 1..];
+                let port_val = rest
+                    .strip_prefix(':')
+                    .and_then(|p| p.parse::<u16>().ok())
+                    .unwrap_or(port);
+                (host, port_val)
+            } else {
+                (host_port, port)
+            }
+        } else if let Some((h, p_str)) = host_port.rsplit_once(':') {
+            if h.contains(':') {
+                // Multiple colons means it is an unbracketed IPv6 address
+                (host_port, port)
+            } else if let Ok(p_val) = p_str.parse::<u16>() {
+                (h, p_val)
+            } else {
+                (host_port, port)
+            }
+        } else {
+            (host_port, port)
+        };
+
+        if host.contains(':') && !host.starts_with('[') {
+            format!("https://[{}]:{}{}", host, final_port, path)
+        } else {
+            format!("https://{}:{}{}", host, final_port, path)
+        }
     }
 
     fn generate_nanoc() -> String {

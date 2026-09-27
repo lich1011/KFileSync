@@ -121,21 +121,33 @@ impl DeviceAppService {
                 alias: dev.alias.clone(),
             }));
 
-            // Try to store as discovered if it doesn't exist
-            if let Ok(None) = self.repo.find_by_id(dev.device_id.clone()).await {
-                let new_dev = Device {
-                    id: dev.device_id.clone(),
-                    state: DeviceState::Discovered(DiscoveredData {
-                        alias: dev.alias.clone(),
-                        address: dev.address.clone(),
-                    }),
-                };
-                if let Err(e) = self.repo.save(new_dev).await {
-                    eprintln!(
-                        "[DeviceAppService] Failed to persist discovered device: {}",
-                        e
-                    );
+            // Store as discovered or update address/alias if already in Discovered state
+            match self.repo.find_by_id(dev.device_id.clone()).await {
+                Ok(None) => {
+                    let new_dev = Device {
+                        id: dev.device_id.clone(),
+                        state: DeviceState::Discovered(DiscoveredData {
+                            alias: dev.alias.clone(),
+                            address: dev.address.clone(),
+                        }),
+                    };
+                    if let Err(e) = self.repo.save(new_dev).await {
+                        eprintln!(
+                            "[DeviceAppService] Failed to persist discovered device: {}",
+                            e
+                        );
+                    }
                 }
+                Ok(Some(mut existing)) => {
+                    if let DeviceState::Discovered(ref mut data) = existing.state {
+                        if data.address != dev.address || data.alias != dev.alias {
+                            data.address = dev.address.clone();
+                            data.alias = dev.alias.clone();
+                            let _ = self.repo.save(existing).await;
+                        }
+                    }
+                }
+                Err(_) => {}
             }
         }
 

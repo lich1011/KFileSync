@@ -70,7 +70,26 @@ impl DiscoveryStrategy for MdnsStrategy {
                     .unwrap_or(fullname)
                     .to_string();
 
-                    let ip = info.get_addresses().iter().next().map(|ip| ip.to_string()).unwrap_or_default();
+                    let ip = info
+                        .get_addresses()
+                        .iter()
+                        .find(|addr| addr.is_ipv4())
+                        .or_else(|| {
+                            info.get_addresses().iter().find(|addr| {
+                                if let std::net::IpAddr::V6(v6) = addr {
+                                    !v6.is_unicast_link_local()
+                                } else {
+                                    false
+                                }
+                            })
+                        })
+                        .or_else(|| info.get_addresses().iter().find(|addr| addr.is_ipv6()))
+                        .map(|ip| ip.to_string())
+                        .unwrap_or_default();
+
+                    if ip.is_empty() {
+                        continue;
+                    }
                     
                     let device = DiscoveredDevice {
                         device_id: DeviceId(device_id_str.to_string()),

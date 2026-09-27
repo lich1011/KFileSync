@@ -293,17 +293,30 @@ async fn handle_pair_request(
         peer_addr.ip()
     );
 
-    // Save requesting device as Discovered (if not already known).
+    // Save requesting device as Discovered (if not already known) or update its address.
     let peer_id = DeviceId(req.from_device_id.clone());
-    if let Ok(None) = state.device_repo.find_by_id(peer_id.clone()).await {
-        let device = Device {
-            id: peer_id,
-            state: DeviceState::Discovered(DiscoveredData {
-                alias: req.from_alias.clone(),
-                address: peer_addr.ip().to_string(),
-            }),
-        };
-        let _ = state.device_repo.save(device).await;
+    let peer_ip = peer_addr.ip().to_string();
+    match state.device_repo.find_by_id(peer_id.clone()).await {
+        Ok(None) => {
+            let device = Device {
+                id: peer_id,
+                state: DeviceState::Discovered(DiscoveredData {
+                    alias: req.from_alias.clone(),
+                    address: peer_ip,
+                }),
+            };
+            let _ = state.device_repo.save(device).await;
+        }
+        Ok(Some(mut existing)) => {
+            if let DeviceState::Discovered(ref mut data) = existing.state {
+                if data.address != peer_ip || data.alias != req.from_alias {
+                    data.address = peer_ip;
+                    data.alias = req.from_alias.clone();
+                    let _ = state.device_repo.save(existing).await;
+                }
+            }
+        }
+        Err(_) => {}
     }
 
     let our_pin = generate_pin();
