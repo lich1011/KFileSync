@@ -149,7 +149,7 @@ impl PolicyEnforcer {
         let core_device = to_core_device(&device);
         let core_share = share.as_ref().map(to_core_share);
 
-        match evaluate_policy(&core_device, core_share.as_ref(), core_permission, core_direction) {
+        match evaluate_policy(&core_device, core_share, core_permission, core_direction) {
             PolicyDecision::Allowed => {}
             PolicyDecision::DeviceNotPaired => return Err(DomainError::DeviceNotTrusted(peer.0.clone())),
             PolicyDecision::ShareNotFound => return Err(DomainError::ShareNotFound(share_id.0.clone())),

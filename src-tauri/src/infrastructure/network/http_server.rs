@@ -54,6 +54,7 @@ use crate::domain::port::network::NetworkClient;
 use crate::domain::port::repository::DeviceRepository;
 use crate::domain::port::share_repo::ShareRepository;
 use crate::domain::port::transfer_repo::TransferRepository;
+use crate::domain::service::policy_enforcer::{PolicyEnforcer, SyncDirection};
 
 pub struct HttpServerConfig {
     pub port: u16,
@@ -77,6 +78,7 @@ struct ServerAppState {
     transfer_repo: Arc<dyn TransferRepository>,
     network_client: Arc<dyn NetworkClient>,
     event_bus: Arc<dyn EventBus>,
+    policy_enforcer: Arc<PolicyEnforcer>,
     /// Shared with `DeviceAppService` — a pairing session created by either
     /// role (initiator via `start_outbound`, responder via
     /// `receive_incoming`) must be reachable regardless of which side
@@ -98,6 +100,7 @@ pub async fn start_server(
     network_client: Arc<dyn NetworkClient>,
     event_bus: Arc<dyn EventBus>,
     sessions: Arc<PairingSessionStore>,
+    policy_enforcer: Arc<PolicyEnforcer>,
 ) -> Result<(), String> {
     let state = Arc::new(ServerAppState {
         local_device_id,
@@ -111,6 +114,7 @@ pub async fn start_server(
         network_client,
         event_bus,
         sessions,
+        policy_enforcer,
         nonce_state: Arc::new(Mutex::new(NonceWindowState::default())),
     });
 
@@ -414,19 +418,25 @@ async fn handle_pair_confirm(
 
 #[derive(Deserialize)]
 struct PairRevokeBody {
+    #[allow(dead_code)]
     device_id: String,
 }
 
 async fn handle_pair_revoke(
     State(state): State<Arc<ServerAppState>>,
     headers: HeaderMap,
-    Json(req): Json<PairRevokeBody>,
+    Json(_req): Json<PairRevokeBody>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    trust_check(&state, routes::PAIR_REVOKE, &headers).await?;
+    let decision = trust_check(&state, routes::PAIR_REVOKE, &headers).await?;
+    // The revoked device is always the authenticated caller (verified by
+    // `trust_check`), never the body's self-reported `device_id` - otherwise
+    // any paired device could revoke any other paired device's pairing.
+    let peer_id = match decision {
+        TrustDecision::Allow { peer_device_id, .. } => DeviceId(peer_device_id),
+        _ => return Err(StatusCode::FORBIDDEN),
+    };
+    println!("[Server] Received pair revoke from {}", peer_id.0);
 
-    println!("[Server] Received pair revoke from {}", req.device_id);
-
-    let peer_id = DeviceId(req.device_id);
     if let Ok(Some(device)) = state.device_repo.find_by_id(peer_id.clone()).await {
         if let Ok(revoked_state) = device.state.revoke(
             SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
@@ -449,14 +459,17 @@ async fn handle_share_invite(
     headers: HeaderMap,
     Json(req): Json<core_dto::ShareInviteDto>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    trust_check(&state, routes::SHARE_INVITE, &headers).await?;
+    let decision = trust_check(&state, routes::SHARE_INVITE, &headers).await?;
+    let sender_id = match decision {
+        TrustDecision::Allow { peer_device_id, .. } => DeviceId(peer_device_id),
+        _ => return Err(StatusCode::FORBIDDEN),
+    };
 
     println!(
         "[Server] Received share invite: {} from {}",
-        req.share_name, req.from_device_id
+        req.share_name, sender_id.0
     );
 
-    let sender_id = DeviceId(req.from_device_id.clone());
     match state.device_repo.find_by_id(sender_id.clone()).await {
         Ok(Some(device)) => {
             if !matches!(device.state, DeviceState::Paired(_)) {
@@ -566,15 +579,18 @@ async fn handle_share_leave(
     headers: HeaderMap,
     Json(req): Json<core_dto::ShareLeaveDto>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    trust_check(&state, routes::SHARE_LEAVE, &headers).await?;
+    let decision = trust_check(&state, routes::SHARE_LEAVE, &headers).await?;
+    let device_id = match decision {
+        TrustDecision::Allow { peer_device_id, .. } => DeviceId(peer_device_id),
+        _ => return Err(StatusCode::FORBIDDEN),
+    };
 
     println!(
         "[Server] Received share leave: share={} from device={}",
-        req.share_id, req.device_id
+        req.share_id, device_id.0
     );
 
     let share_id = crate::domain::model::share::ShareId(req.share_id);
-    let device_id = DeviceId(req.device_id);
 
     match state.share_repo.find_by_id(&share_id).await {
         Ok(Some(share)) => match share.remove_member(&device_id) {
@@ -629,7 +645,7 @@ fn entry_to_dto(e: &FileEntry) -> core_dto::FileEntryDto {
         size: e.size,
         modified_at_ms: e.modified_at as i64,
         modified_by: e.modified_by.0.clone(),
-        version_vector: e.version.iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        version_vector: core_dto::VersionVectorMap(e.version.iter().map(|(k, v)| (k.to_string(), v)).collect()),
         sha256: e.sha256.clone(),
         blocks: e.blocks.0.iter().map(block_to_dto).collect(),
         deleted: e.deleted,
@@ -710,23 +726,46 @@ async fn handle_transfer_request(
         skip_chunks: Default::default(),
     };
 
-    if trust_check(&state, routes::TRANSFER_REQUEST, &headers).await.is_err() {
-        return Json(reject("anti-replay or trust check failed"));
-    }
+    // The sender's identity is whatever `trust_check` verified against the
+    // paired-device set - never the request body's self-reported
+    // `from_device_id`, which a paired device could set to impersonate any
+    // other paired device.
+    let send_id = match trust_check(&state, routes::TRANSFER_REQUEST, &headers).await {
+        Ok(TrustDecision::Allow { peer_device_id, .. }) => DeviceId(peer_device_id),
+        _ => return Json(reject("anti-replay or trust check failed")),
+    };
 
     // sender must be a Paired device
-    let send_id = DeviceId(req.from_device_id.clone());
     match state.device_repo.find_by_id(send_id.clone()).await {
         Ok(Some(device)) if matches!(device.state, DeviceState::Paired(_)) => {}
         _ => {
-            eprintln!("[Server] Reject transfer: sender {} not paired", req.from_device_id);
+            eprintln!("[Server] Reject transfer: sender {} not paired", send_id.0);
             return Json(reject("sender not paired"));
         }
     }
 
+    // Sender must be pushing into a share it is actually a member of, with a
+    // permission and `SyncMode` that allow inbound writes - without this,
+    // any paired device (member or not) could push files into any share.
+    let share_id = match &req.share_id {
+        Some(id) => crate::domain::model::share::ShareId(id.clone()),
+        None => {
+            eprintln!("[Server] Reject transfer: no share_id from {}", send_id.0);
+            return Json(reject("share_id required"));
+        }
+    };
+    if let Err(e) = state
+        .policy_enforcer
+        .check_sync(&send_id, &share_id, SyncDirection::Push)
+        .await
+    {
+        eprintln!("[Server] Reject transfer: policy denied for {}: {}", send_id.0, e);
+        return Json(reject("permission denied"));
+    }
+
     // resolve receive base dir and refuse paths that escape it
     let base_dir = dirs::download_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    let recv_dir = base_dir.join("KFileSync").join(&req.from_device_id);
+    let recv_dir = base_dir.join("KFileSync").join(&send_id.0);
 
     if let Err(e) = std::fs::create_dir_all(&recv_dir) {
         eprintln!("[Server] Fail to create receive dir: {}", e);
@@ -800,7 +839,7 @@ async fn handle_transfer_request(
         job_id: JobId(req.job_id.clone()),
         session_id: req.session_id.clone(),
         job_type: TransferType::Receive,
-        peer_device_id: DeviceId(req.from_device_id.clone()),
+        peer_device_id: send_id.clone(),
         share_id: req.share_id.clone(),
         state: TransferState::Active {
             started_at: now_secs(),

@@ -106,6 +106,7 @@ impl HttpSyncFlow {
         let plan = self.generate_plan(share_id, peer, &remote_index).await?;
         self.execute_plan(&plan, peer).await?;
         self.update_versions(share_id, &plan).await?;
+        self.emit_events(&plan).await?;
         Ok(plan)
     }
 // }

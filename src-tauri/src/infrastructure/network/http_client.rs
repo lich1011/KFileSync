@@ -402,7 +402,7 @@ impl NetworkClient for ReqwestNetworkClient {
                 .map_err(net_err)?;
             Ok(TransferResponse {
                 status: if res_dto.accepted { "accepted".to_string() } else { res_dto.reason.unwrap_or_else(|| "rejected".to_string()) },
-                skip_chunks: res_dto.skip_chunks.iter().map(|(file_id, indices)| SkipChunkInfo {
+                skip_chunks: res_dto.skip_chunks.0.iter().map(|(file_id, indices)| SkipChunkInfo {
                     file_id: file_id.clone(),
                     chunk_indices: indices.clone(),
                 }).collect(),

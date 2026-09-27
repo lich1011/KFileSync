@@ -1,9 +1,28 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { Device, FileRequestDto, PairedDevice, SyncStatus, SyncConflict } from '../types'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import type { Device, FileRequestDto, PairedDevice, SyncStatus, SyncConflict, ShareInfo } from '../types'
 
 export async function discoverDevices(): Promise<Device[]> {
   const raw = await invoke<{ id: string; alias: string; address: string }[]>('discover_devices')
   return raw.map(d => ({ ...d, status: 'Discovered' as const }))
+}
+
+export async function getLocalAddress(): Promise<string> {
+  return invoke<string>('get_local_address')
+}
+
+export interface PairingRequestReceivedPayload {
+  requestId: string
+  fromDeviceId: string
+  fromAlias: string
+  ourPin: string
+}
+
+/** Fired when a peer initiates pairing against us (we're the responder, ADR-010). */
+export function onPairingRequestReceived(
+  handler: (payload: PairingRequestReceivedPayload) => void
+): Promise<UnlistenFn> {
+  return listen<PairingRequestReceivedPayload>('PairingRequestReceived', event => handler(event.payload))
 }
 
 export async function requestPairing(targetId: string): Promise<string> {
@@ -77,4 +96,8 @@ export async function resolveConflict(conflictId: string, resolution: string): P
 
 export async function triggerSync(shareId: string, peerId: string): Promise<string> {
   return invoke<string>('trigger_sync', { shareId, peerId })
+}
+
+export async function listShares(): Promise<ShareInfo[]> {
+  return invoke<ShareInfo[]>('list_shares')
 }

@@ -1,91 +1,142 @@
-:root {
-  /* 颜色变量 */
-  --bg: #0d0d14;
-  --bg-card: #1e1e2f;
-  --bg-hover: #2a2a3d;
-  --bg-input: #16162a;
-  --text: #ececec;
-  --text-muted: #aaa;
-  --border: #333;
-  --accent: #3498db;
-  --accent-hover: #2980b9;
-  --success: #2ecc71;
-  --warning: #f39c12;
-  --danger: #e74c3c;
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
-  /* 全局样式 */
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
-  font-size: 14px;
-  line-height: 1.5;
-  color: var(--text);
-  background: var(--bg);
-  -webkit-font-smoothing: antialiased;
+:root {
+  /* Material 3 Light Mode Tokens */
+  --md-surface: #fdf8fd;
+  --md-surface-dim: #ded8df;
+  --md-surface-bright: #fdf8fd;
+  --md-surface-container-lowest: #ffffff;
+  --md-surface-container-low: #f7f2f9;
+  --md-surface-container: #f2edf4;
+  --md-surface-container-high: #ece7ee;
+  --md-surface-container-highest: #e6e1e8;
+  --md-on-surface: #1d1b20;
+  --md-on-surface-variant: #49454f;
+  --md-on-surface-muted: #79747e;
+  --md-outline: #79747e;
+  --md-outline-variant: #cac4d0;
+  --md-primary: #0061a4;
+  --md-on-primary: #ffffff;
+  --md-primary-container: #d1e4ff;
+  --md-on-primary-container: #001d36;
+  --md-secondary: #535f70;
+  --md-on-secondary: #ffffff;
+  --md-secondary-container: #d7e3f7;
+  --md-on-secondary-container: #101c2b;
+  --md-tertiary: #6b5778;
+  --md-on-tertiary: #ffffff;
+  --md-tertiary-container: #f2daff;
+  --md-on-tertiary-container: #251431;
+  --md-error: #ba1a1a;
+  --md-on-error: #ffffff;
+  --md-error-container: #ffdad6;
+  --md-on-error-container: #410002;
+  --md-success: #198754;
+  --md-on-success: #ffffff;
+  --md-success-container: #d1f2d9;
+  --md-on-success-container: #00210e;
 }
 
-/* 基础重置 */
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
+/* Material 3 Dark Mode (Desktop Default) */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --md-surface: #111318;
+    --md-surface-dim: #0e1015;
+    --md-surface-bright: #37393e;
+    --md-surface-container-lowest: #0c0e12;
+    --md-surface-container-low: #191c20;
+    --md-surface-container: #1d2024;
+    --md-surface-container-high: #272a2f;
+    --md-surface-container-highest: #32353a;
+    --md-on-surface: #e2e2e9;
+    --md-on-surface-variant: #c4c6d0;
+    --md-on-surface-muted: #8e9099;
+    --md-outline: #8e9099;
+    --md-outline-variant: #44474f;
+    --md-primary: #9ecaff;
+    --md-on-primary: #003258;
+    --md-primary-container: #00497d;
+    --md-on-primary-container: #d1e4ff;
+    --md-secondary: #bdc7dc;
+    --md-on-secondary: #273141;
+    --md-secondary-container: #3d4758;
+    --md-on-secondary-container: #d9e3f8;
+    --md-tertiary: #d6bee4;
+    --md-on-tertiary: #3b2947;
+    --md-tertiary-container: #523f5f;
+    --md-on-tertiary-container: #f2daff;
+    --md-error: #ffb4ab;
+    --md-on-error: #690005;
+    --md-error-container: #93000a;
+    --md-on-error-container: #ffdad6;
+    --md-success: #78dc9c;
+    --md-on-success: #00391c;
+    --md-success-container: #00522c;
+    --md-on-success-container: #95f9b7;
+  }
+}
+
+.dark {
+  --md-surface: #111318;
+  --md-surface-dim: #0e1015;
+  --md-surface-bright: #37393e;
+  --md-surface-container-lowest: #0c0e12;
+  --md-surface-container-low: #191c20;
+  --md-surface-container: #1d2024;
+  --md-surface-container-high: #272a2f;
+  --md-surface-container-highest: #32353a;
+  --md-on-surface: #e2e2e9;
+  --md-on-surface-variant: #c4c6d0;
+  --md-on-surface-muted: #8e9099;
+  --md-outline: #8e9099;
+  --md-outline-variant: #44474f;
+  --md-primary: #9ecaff;
+  --md-on-primary: #003258;
+  --md-primary-container: #00497d;
+  --md-on-primary-container: #d1e4ff;
+  --md-secondary: #bdc7dc;
+  --md-on-secondary: #273141;
+  --md-secondary-container: #3d4758;
+  --md-on-secondary-container: #d9e3f8;
+  --md-tertiary: #d6bee4;
+  --md-on-tertiary: #3b2947;
+  --md-tertiary-container: #523f5f;
+  --md-on-tertiary-container: #f2daff;
+  --md-error: #ffb4ab;
+  --md-on-error: #690005;
+  --md-error-container: #93000a;
+  --md-on-error-container: #ffdad6;
+  --md-success: #78dc9c;
+  --md-on-success: #00391c;
+  --md-success-container: #00522c;
+  --md-on-success-container: #95f9b7;
 }
 
 body {
-  min-height: 100vh;
+  margin: 0;
+  padding: 0;
+  font-family: 'Roboto', 'Inter', system-ui, -apple-system, sans-serif;
+  background-color: var(--md-surface);
+  color: var(--md-on-surface);
+  user-select: none;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
 }
 
-/* 按钮样式 */
-button {
-  font-family: inherit;
-  font-size: inherit;
-  cursor: pointer;
-  border: none;
-  border-radius: 6px;
-  padding: 8px 16px;
-  transition: background 0.2s;
+/* Custom modern scrollbars for desktop */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
 }
-
-button.primary {
-  background: var(--accent);
-  color: #fff;
-}
-
-button.primary:hover {
-  background: var(--accent-hover);
-}
-
-button.danger {
-  background: var(--danger);
-  color: #fff;
-}
-
-button.danger:hover {
-  background: #c0392b;
-}
-
-button.ghost {
+::-webkit-scrollbar-track {
   background: transparent;
-  color: var(--text-muted);
-  padding: 6px 10px;
 }
-
-button.ghost:hover {
-  background: var(--bg-hover);
-  color: var(--text);
+::-webkit-scrollbar-thumb {
+  background: var(--md-outline-variant);
+  border-radius: 9999px;
 }
-
-/* 表单控件样式 */
-input, select {
-  font-family: inherit;
-  font-size: inherit;
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px 12px;
-  color: var(--text);
-  outline: none;
-  width: 100%;
-}
-
-input:focus, select:focus {
-  border-color: var(--accent);
+::-webkit-scrollbar-thumb:hover {
+  background: var(--md-outline);
 }

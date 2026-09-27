@@ -6,8 +6,20 @@ import { useNotificationStore } from './notifications'
 
 export const useShareStore = defineStore('shares', () => {
   const shares = ref<ShareInfo[]>([])
+  const loading = ref(false)
   const showCreateDialog = ref(false)
   const invitingShareId = ref<string | null>(null)
+
+  async function fetchShares() {
+    loading.value = true
+    try {
+      shares.value = await api.listShares()
+    } catch (e) {
+      useNotificationStore().add('error', `加载共享目录失败: ${e}`)
+    } finally {
+      loading.value = false
+    }
+  }
 
   async function createShare(name: string, localPath: string, syncMode: SyncMode) {
     try {
@@ -61,5 +73,15 @@ export const useShareStore = defineStore('shares', () => {
     }
   }
 
-  return { shares, showCreateDialog, invitingShareId, createShare, inviteMember, removeMember, startWatching }
+  return {
+    shares,
+    loading,
+    showCreateDialog,
+    invitingShareId,
+    fetchShares,
+    createShare,
+    inviteMember,
+    removeMember,
+    startWatching,
+  }
 })

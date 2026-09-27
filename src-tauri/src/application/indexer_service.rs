@@ -3,7 +3,7 @@ use crate::domain::event::sync_events::LocalIndexChanged;
 use crate::domain::model::device::DeviceId;
 use crate::domain::model::file_entry::{BlockInfo, BlockList, EntryType, FileEntry};
 use crate::domain::model::share::ShareId;
-use crate::domain::port::event_bus::{self, EventBus};
+use crate::domain::port::event_bus::EventBus;
 use crate::domain::port::file_index_repo::FileIndexRepository;
 use crate::domain::port::file_watcher::{FileEvent, FileEventType, FileWatcher, WatchHandle};
 use crate::domain::port::share_repo::ShareRepository;
@@ -186,10 +186,26 @@ impl IndexerService {
     /// `share_root`, reading `.syncignore` content from disk if present.
     /// Passes `is_mobile = false` — desktop only applies `COMMON_DEFAULTS`
     /// (which includes `.lansync-tmp/`), never `MOBILE_DEFAULTS`.
+    ///
+    /// A syntax error in the user's `.syncignore` file must not crash the
+    /// indexing task (a user can trigger this just by mistyping a line, and
+    /// this function is re-invoked on every edit of that file) - on error,
+    /// log it and fall back to the built-in defaults only. Only a broken
+    /// built-in default (a real bug, not user input) still panics.
     fn build_ignore_spec(share_root: &str, sync_ignore_path: &Path) -> IgnoreSpec {
         let content = std::fs::read_to_string(sync_ignore_path).ok();
-        IgnoreSpec::build(share_root, content.as_deref(), &[], false)
-            .expect("built-in ignore defaults must be valid gitignore syntax")
+        match IgnoreSpec::build(share_root, content, &[], false) {
+            Ok(spec) => spec,
+            Err(e) => {
+                eprintln!(
+                    "[Indexer] Invalid .syncignore syntax in {}: {} - ignoring its contents, falling back to built-in defaults",
+                    sync_ignore_path.display(),
+                    e
+                );
+                IgnoreSpec::build(share_root, None, &[], false)
+                    .expect("built-in ignore defaults must be valid gitignore syntax")
+            }
+        }
     }
 
     async fn process_events(

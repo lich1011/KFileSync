@@ -7,7 +7,7 @@ use kfilesync_core::service::ignore_spec::IgnoreSpec;
 /// `COMMON_DEFAULTS` applied).
 #[test]
 fn test_ignore_spec() {
-    let spec = IgnoreSpec::build("/base", None, &["*.tmp", "build/"], false).unwrap();
+    let spec = IgnoreSpec::build("/base", None, &["*.tmp".to_string(), "build/".to_string()], false).unwrap();
 
     // 1. Built-in ignores (COMMON_DEFAULTS), including the .lansync-tmp/
     //    regression this test exists to guard.

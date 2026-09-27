@@ -168,7 +168,7 @@ impl DeviceAppService {
         let nonce = generate_nonce();
         let our_pin = generate_pin();
 
-        let (session, prepared) = pairing_state::start_outbound(
+        let kfilesync_core::trust::pairing_state::StartOutboundResult { session, request: prepared } = pairing_state::start_outbound(
             &request_id,
             &nonce,
             &target.0,
@@ -188,9 +188,10 @@ impl DeviceAppService {
         self.sessions.insert(session);
 
         let guard = BootstrapGuard::new(self.network_client.clone());
+        let headers = prepared.headers.into_iter().map(|h| (h.name, h.value)).collect();
         let result = self
             .network_client
-            .send_pair_request(&address, crate::DEFAULT_PORT, prepared.body, prepared.headers)
+            .send_pair_request(&address, crate::DEFAULT_PORT, prepared.body, headers)
             .await;
         drop(guard);
 
@@ -246,24 +247,29 @@ impl DeviceAppService {
         };
 
         let nonce = generate_nonce();
-        let prepared = pairing_state::prepare_confirm(
+        let prepared = match pairing_state::prepare_confirm(
             &session,
             &self.local_device_id.0,
             now_ms(),
             &nonce,
             &self.local_cert_pem,
-        )
-        .ok_or_else(|| {
-            DomainError::BusinessRuleViolation(
-                "peer PIN was not recorded before confirming".to_string(),
-            )
-        })?
-        .map_err(|e| DomainError::Network(format!("{:?}", e)))?;
+        ) {
+            pairing_state::PrepareConfirmOutcome::Ready(req) => req,
+            pairing_state::PrepareConfirmOutcome::NotReady => {
+                return Err(DomainError::BusinessRuleViolation(
+                    "peer PIN was not recorded before confirming".to_string(),
+                ));
+            }
+            pairing_state::PrepareConfirmOutcome::EncodeFailed(err) => {
+                return Err(DomainError::Network(err));
+            }
+        };
 
         let guard = BootstrapGuard::new(self.network_client.clone());
+        let headers = prepared.headers.into_iter().map(|h| (h.name, h.value)).collect();
         let outcome = self
             .network_client
-            .send_pair_confirm(&address, crate::DEFAULT_PORT, prepared.body, prepared.headers)
+            .send_pair_confirm(&address, crate::DEFAULT_PORT, prepared.body, headers)
             .await;
         drop(guard);
 

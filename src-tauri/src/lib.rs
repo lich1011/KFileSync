@@ -13,7 +13,7 @@ use application::{
 };
 use domain::model::transfer::TransferState;
 use domain::port::transfer_repo::TransferRepository;
-use std::{net::Shutdown, path::PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use domain::service::policy_enforcer::PolicyEnforcer;
@@ -41,7 +41,7 @@ use infrastructure::{
 
 use interfaces::tauri_cmds::{
     accept_transfer, add_manual_device, cancel_transfer, confirm_pairing, create_share,
-    discover_devices, get_conflicts, get_paired_devices, get_sync_status, invite_to_share,
+    discover_devices, get_conflicts, get_local_address, get_paired_devices, get_sync_status, invite_to_share,
     list_shares, pause_transfer, reject_pairing, remove_share_member, request_pairing, 
     resolve_conflict, resume_transfer, send_files, start_watching_share, trigger_sync, AppState,
 };
@@ -515,6 +515,7 @@ pub fn run() {
     let server_network_client = network_client.clone();
     let server_event_bus = event_bus.clone();
     let server_sessions = sessions.clone();
+    let server_policy_enforcer = policy_enforcer.clone();
     rt.spawn(async move {
         if let Err(e) = start_server(
             server_config,
@@ -528,6 +529,7 @@ pub fn run() {
             server_network_client,
             server_event_bus,
             server_sessions,
+            server_policy_enforcer
         )
         .await
         {
@@ -546,7 +548,7 @@ pub fn run() {
         share_repo: share_repo.clone()
     };
 
-    let shutdown_for_exit = shutdown.clone();
+    let _shutdown_for_exit = shutdown.clone();
     let event_bus_for_app = event_bus.clone();
 
     tauri::Builder::default()
@@ -587,6 +589,19 @@ pub fn run() {
                                 })
                             );
                         }
+                        "PairingRequestReceived"
+                        |"PairingCompleted" => {
+                            let mut body = serde_json::json!({
+                                "aggregateId": event.aggregate_id(),
+                                "eventType": event.event_type()
+                            });
+                            if let (Some(body_map), serde_json::Value::Object(payload_map))
+                                = (body.as_object_mut(), event.payload()) {
+                                body_map.extend(payload_map);
+                            }
+                            let _ = handle.emit(event.event_type(), body);
+                        }
+
                         _ =>{}
                     }
                 }
@@ -596,6 +611,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             discover_devices,
+            get_local_address,
             request_pairing,
             confirm_pairing,
             reject_pairing,

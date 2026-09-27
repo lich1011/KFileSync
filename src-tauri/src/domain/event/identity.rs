@@ -22,6 +22,13 @@ pub struct PairingCompleted {
 impl DomainEvent for PairingCompleted {
     fn event_type(&self) -> &str { "PairingCompleted" }
     fn aggregate_id(&self) -> &str { &self.peer_device.0 }
+    fn payload(&self) -> serde_json::Value {
+        serde_json::json!({
+            "localDevice": self.local_device.0,
+            "peerDevice": self.peer_device.0,
+            "pairedAt": self.paired_at
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -50,4 +57,12 @@ pub struct PairingRequestReceived {
 impl DomainEvent for PairingRequestReceived {
     fn event_type(&self) -> &str { "PairingRequestReceived" }
     fn aggregate_id(&self) -> &str { &self.from_device_id.0 }
+    fn payload(&self) -> serde_json::Value {
+        serde_json::json!({
+            "requestId": self.request_id,
+            "fromDeviceId": self.from_device_id.0,
+            "fromAlias": self.from_alias,
+            "ourPin": self.our_pin
+        })
+    }
 }

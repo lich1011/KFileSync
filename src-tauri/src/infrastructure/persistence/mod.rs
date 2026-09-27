@@ -196,21 +196,24 @@ fn migrate_file_entries_timestamps_to_millis(conn: &rusqlite::Connection) -> rus
         return Ok(());
     }
 
-    conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "UPDATE file_entries SET modified_at = modified_at * 1000 WHERE modified_at IS NOT NULL",
         [],
     )?;
 
-    conn.execute(
+    tx.execute(
         "UPDATE file_entries SET deleted_at = deleted_at * 1000 WHERE deleted_at IS NOT NULL",
         [],
     )?;
 
-    conn.execute(
+    tx.execute(
         "INSERT INTO config (key, value) VALUES ('schema_version', '2')
         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         [],
     )?;
+
+    tx.commit()?;
 
     Ok(())
 }

@@ -41,6 +41,15 @@ pub async fn discover_devices(state: State<'_, AppState>) -> Result<Vec<Discover
     Ok(dtos)
 }
 
+/// Local LAN IP address, so the user can read it aloud / show it to a peer
+/// typing it into the mobile app's manual "Enter IP" field.
+#[tauri::command]
+pub fn get_local_address() -> Result<String, String> {
+    crate::infrastructure::network::discovery::http_scan::get_local_ip()
+        .map(|ip| ip.to_string())
+        .ok_or_else(|| "no local network address found".to_string())
+}
+
 #[tauri::command]
 pub async fn request_pairing(target_id: String, state: State<'_, AppState>) -> Result<String, String> {
     state.identity_service.initiate_pairing(&DeviceId(target_id)).await.map_err(|e| e.to_string())

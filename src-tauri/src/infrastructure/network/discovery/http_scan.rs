@@ -8,7 +8,7 @@ use tokio::sync::mpsc::Sender;
 use std::net::IpAddr;
 
 // 获取本地 IP 地址
-fn get_local_ip() -> Option<IpAddr> {
+pub fn get_local_ip() -> Option<IpAddr> {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("8.8.8.8:80").ok()?;
     socket.local_addr().ok().map(|a| a.ip())

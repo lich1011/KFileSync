@@ -1,4 +1,3 @@
-use std::fmt::format;
 use std::sync::Arc;
 
 use crate::domain::error::DomainError;
@@ -196,7 +195,7 @@ impl TransferAppService {
             Ok(resp) => resp,
             Err(e) =>{
                 let failed = job.clone().fail(TransferError::ConnectionLost)?;
-                self.transfer_repo.save(failed.clone()).await:;
+                self.transfer_repo.save(failed.clone()).await?;
                 self.event_bus.publish(Box::new(TransferFailed{
                     job_id: failed.job_id.clone(),
                     error: TransferError::ConnectionLost,
@@ -232,7 +231,7 @@ impl TransferAppService {
         for item in &item_snapshot {
             let skip_set = skip_map.get(&item.file_id.0);
             for chunk in &item.chunk_manifest.chunks {
-                if chunk.index < item.chunks_done || skip_set.is_some_and(|s| s.contains(&chunk.index)) {
+                if chunk.index < item.chunks_done || skip_set.is_some_and(|s: &std::collections::HashSet<u32>| s.contains(&chunk.index)) {
                     continue;
                 }
 
